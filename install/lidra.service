@@ -1,0 +1,16 @@
+[Unit]
+Description=LIDRA Intrusion Detection & Response Agent
+After=network.target
+
+[Service]
+Type=simple
+User=shiga0_0
+WorkingDirectory=/path/to/LIDRA/src
+ExecStart=/usr/bin/python3 /path/to/LIDRA/src/lidra_agent.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/lidra/service.log
+StandardError=append:/var/log/lidra/service_error.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+mode: development
+log_dir: ./logs
+state_dir: ./state
+detection:
+  thresholds:
+    ssh_failed_attempts: 5
+    time_window_seconds: 300
+deception:
+  honeypot_port: 2222
+  honeyfiles:
+    - ./state/honey/secret.txt
+response:
+  block_command: block_ip.sh
+  block_ttl_seconds: 3600
+  dry_run: false
+alerts:
+  slack_webhook: ""
+whitelist:
+  - 127.0.0.1
