@@ -634,7 +634,7 @@ class InlineEngine:
         data = sock.recv(4096)
         if len(data) < 16:
             raise RuntimeError(f"Short ACK response ({label})")
-        _len, _type, _flg, _seq, _pid = struct.unpack("=HHII", data[:16])
+        _len, _type, _flg, _seq, _pid = struct.unpack("=IHHII", data[:16])
         if _type == NLMSG_ERROR and len(data) >= 20:
             err = struct.unpack("=i", data[16:20])[0]
             if err != 0:
@@ -643,7 +643,7 @@ class InlineEngine:
     @staticmethod
     def _nfq_nlmsg(msg_type, flags, seq, pid, payload):
         length = 16 + len(payload)
-        return struct.pack("=HHII", length, msg_type, flags, seq, pid) + payload
+        return struct.pack("=IHHII", length, msg_type, flags, seq, pid) + payload
 
     @staticmethod
     def _nfq_nlattr(attr_type, data):
@@ -704,7 +704,7 @@ class InlineEngine:
         while offset < len(data):
             if offset + 16 > len(data):
                 break
-            nlmsg_len, nlmsg_type, nlmsg_flags, nlmsg_seq, nlmsg_pid = struct.unpack("=HHII", data[offset:offset + 16])
+            nlmsg_len, nlmsg_type, nlmsg_flags, nlmsg_seq, nlmsg_pid = struct.unpack("=IHHII", data[offset:offset + 16])
             if nlmsg_len < 16 or offset + nlmsg_len > len(data):
                 break
             payload = data[offset + 16:offset + nlmsg_len]
