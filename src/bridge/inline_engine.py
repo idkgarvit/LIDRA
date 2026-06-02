@@ -406,7 +406,7 @@ class InlineEngine:
         if protocol == "tcp":
             conn = self._connection_tracker.track(packet)
             if packet.get("payload"):
-                direction = "client" if packet.get("src_port", 0) < 1024 else "server"
+                direction = "client" if packet.get("src_port", 0) > 1024 else "server"
                 messages = self._stream_reassembler.add_segment(packet, direction)
                 if messages and conn:
                     app_proto = conn.app_protocol if conn else ""
