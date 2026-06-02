@@ -612,9 +612,9 @@ class InlineEngine:
 
     def _nfq_send_config(self, sock, cmd, pf, queue_num, label=""):
         nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_CONFIG
-        cmd_data = struct.pack("=BBH", cmd, 0, pf)
+        cmd_data = struct.pack(">BBH", cmd, 0, pf)
         attr = self._nfq_nlattr(NFQA_CFG_CMD, cmd_data)
-        nfgen = struct.pack("=BBH", 0, 0, queue_num)
+        nfgen = struct.pack(">BBH", 0, 0, queue_num)
         payload = nfgen + attr
         msg = self._nfq_nlmsg(nlm_type, NLM_F_REQUEST | NLM_F_ACK, 1, os.getpid(), payload)
         sock.send(msg)
@@ -622,9 +622,9 @@ class InlineEngine:
 
     def _nfq_set_copy_mode(self, sock, queue_num, copy_mode, copy_range):
         nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_CONFIG
-        params = struct.pack("=I", copy_range) + struct.pack("=B", copy_mode) + b"\x00\x00\x00"
+        params = struct.pack(">IB", copy_range, copy_mode) + b"\x00\x00\x00"
         attr = self._nfq_nlattr(NFQA_CFG_PARAMS, params)
-        nfgen = struct.pack("=BBH", 0, 0, queue_num)
+        nfgen = struct.pack(">BBH", 0, 0, queue_num)
         payload = nfgen + attr
         msg = self._nfq_nlmsg(nlm_type, NLM_F_REQUEST | NLM_F_ACK, 2, os.getpid(), payload)
         sock.send(msg)
@@ -711,7 +711,7 @@ class InlineEngine:
             subsys = nlmsg_type >> 8
             msg_type = nlmsg_type & 0xFF
             if subsys == NFNL_SUBSYS_QUEUE and msg_type == NFQNL_MSG_PACKET and len(payload) >= 4:
-                nfgen_family, nfgen_version, nfgen_res_id = struct.unpack("=BBH", payload[:4])
+                nfgen_family, nfgen_version, nfgen_res_id = struct.unpack(">BBH", payload[:4])
                 attr_offset = 4
                 packet_id = None
                 packet_data = None
@@ -723,7 +723,7 @@ class InlineEngine:
                         break
                     nla_data = payload[attr_offset + 4:attr_offset + nla_len]
                     if nla_type == NFQA_PACKET_HDR and len(nla_data) >= 4:
-                        packet_id = struct.unpack("=I", nla_data[:4])[0]
+                        packet_id = struct.unpack(">I", nla_data[:4])[0]
                     elif nla_type == NFQA_PAYLOAD:
                         packet_data = nla_data
                     attr_offset += (nla_len + 3) & ~3
@@ -739,9 +739,9 @@ class InlineEngine:
 
     def _nfq_send_verdict(self, sock, verdict, packet_id, queue_num):
         nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_VERDICT
-        vhdr = struct.pack("=II", verdict, packet_id)
+        vhdr = struct.pack(">II", verdict, packet_id)
         vhdr_attr = self._nfq_nlattr(NFQA_VERDICT_HDR, vhdr)
-        nfgen = struct.pack("=BBH", 2, 0, queue_num)
+        nfgen = struct.pack(">BBH", 2, 0, queue_num)
         payload = nfgen + vhdr_attr
         msg = self._nfq_nlmsg(nlm_type, NLM_F_REQUEST, 0, 0, payload)
         try:
