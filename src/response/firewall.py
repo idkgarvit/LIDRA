@@ -216,14 +216,10 @@ class FirewallManager:
     # --- Local mode (same-machine) iptables methods ---
 
     def setup_local_iptables(self, queue_num: int = 0):
-        """Add NFQUEUE rule for local mode — only NEW TCP connections, with --queue-bypass.
+        """Add NFQUEUE rule for local mode — only TCP, with --queue-bypass.
 
-        Why -p tcp -m state --state NEW:
-        - UDP (DHCP 67/68, DNS 53) → passes through untouched — no internet loss
-        - ICMP (ping) → passes through untouched
-        - Established/related TCP (existing SSH, downloads) → passes through untouched
-        - NEW TCP connections (what attackers use: HTTP, SSH, etc.) → NFQUEUE
-        - --queue-bypass: if LIDRA isn't running, even NEW TCP passes through
+        Uses NEW,ESTABLISHED so HTTP request payloads (not just SYN) reach
+        the DPI engine. UDP/ICMP pass through untouched.
         """
         if self.dry_run:
             logger.info(f"[DRY-RUN] Would add iptables INPUT NFQUEUE rule (queue {queue_num})")
@@ -235,12 +231,12 @@ class FirewallManager:
                 [
                     "iptables", "-I", "INPUT",
                     "-p", "tcp",
-                    "-m", "state", "--state", "NEW",
+                    "-m", "state", "--state", "NEW,ESTABLISHED",
                     "-j", "NFQUEUE", "--queue-num", str(queue_num), "--queue-bypass"
                 ],
                 check=True, capture_output=True
             )
-            logger.info(f"[Firewall] INPUT NFQUEUE rule added (queue {queue_num}, TCP NEW only, bypass)")
+            logger.info(f"[Firewall] INPUT NFQUEUE rule added (queue {queue_num}, TCP NEW,ESTABLISHED, bypass)")
         except subprocess.CalledProcessError as e:
             stderr = e.stderr.decode() if e.stderr else str(e)
             if "already exists" in stderr or "exists" in stderr:

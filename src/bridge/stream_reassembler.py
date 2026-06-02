@@ -87,7 +87,7 @@ class StreamReassembler:
         messages = []
         if dst_port not in _HTTP_PORTS:
             return messages
-            while True:
+        while True:
                 header_end = buffer.find(b"\r\n\r\n")
                 if header_end == -1:
                     break
