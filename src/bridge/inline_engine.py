@@ -85,6 +85,25 @@ class InlineEngine:
             log_parser=None
         )
 
+        from detection.analyzer.dos_detector import DoSDetector
+        from detection.analyzer.fragment_analyzer import FragmentAnalyzer
+        from detection.analyzer.port_analyzer import PortAnalyzer
+        from detection.analyzer.tunnel_detector import TunnelDetector
+        from detection.analyzer.covert_detector import CovertDetector
+        from detection.analyzer.ipv6_analyzer import IPv6Analyzer
+        from detection.analyzer.l2_analyzer import L2Analyzer
+        from detection.analyzer.timing_analyzer import TimingAnalyzer
+        from detection.analyzer.proxy_detector import ProxyDetector
+        self._dos_detector = DoSDetector(inline_cfg.get("dos", {}))
+        self._fragment_analyzer = FragmentAnalyzer()
+        self._port_analyzer = PortAnalyzer()
+        self._tunnel_detector = TunnelDetector()
+        self._covert_detector = CovertDetector()
+        self._ipv6_analyzer = IPv6Analyzer()
+        self._l2_analyzer = L2Analyzer()
+        self._timing_analyzer = TimingAnalyzer()
+        self._proxy_detector = ProxyDetector()
+
         self._packet_count = 0
         self._pass_count = 0
         self._drop_count = 0
@@ -434,6 +453,18 @@ class InlineEngine:
                         "confidence": dpi_result.confidence,
                         "mitre": dpi_result.mitre,
                     })
+
+        for analyzer in (self._dos_detector, self._fragment_analyzer,
+                         self._port_analyzer, self._tunnel_detector,
+                         self._covert_detector, self._ipv6_analyzer,
+                         self._l2_analyzer, self._timing_analyzer,
+                         self._proxy_detector):
+            try:
+                result = analyzer.analyze(packet)
+                if result:
+                    detections.extend(result)
+            except Exception as e:
+                logger.debug(f"[{type(analyzer).__name__}] error: {e}")
 
         return detections
 
