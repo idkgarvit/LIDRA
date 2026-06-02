@@ -650,8 +650,18 @@ class InlineEngine:
         sock = None
         try:
             sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER)
-            sock.bind((os.getpid(), 0))
             sock.settimeout(1.0)
+            for port_attempt in range(5):
+                try:
+                    sock.bind((os.getpid() + port_attempt, 0))
+                    break
+                except OSError:
+                    if port_attempt == 4:
+                        raise
+                    continue
+            # Clean up stale bindings before claiming the queue
+            self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_UNBIND, socket.AF_INET, 0, "PF_UNBIND AF_INET")
+            self._nfq_send_config(sock, NFQNL_CFG_CMD_UNBIND, socket.AF_INET, queue_num, "UNBIND")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET, 0, "PF_BIND AF_INET")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET6, 0, "PF_BIND AF_INET6")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_BIND, socket.AF_INET, queue_num, "BIND")
