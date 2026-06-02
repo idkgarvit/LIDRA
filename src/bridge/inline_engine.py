@@ -4,6 +4,8 @@ import threading
 import struct
 import socket
 import subprocess
+import fcntl
+import os
 from typing import Dict, List, Optional, Callable
 
 logger = logging.getLogger(__name__)
@@ -15,7 +17,32 @@ except ImportError:
     HAS_DPKT = False
     logger.warning("dpkt not available, using minimal packet parser")
 
+# nfnetlink_queue constants (from <linux/netfilter/nfnetlink_queue.h>)
+NFNL_SUBSYS_QUEUE = 3
+NETLINK_NETFILTER = 12
+NFQNL_MSG_PACKET = 0
+NFQNL_MSG_VERDICT = 1
+NFQNL_MSG_CONFIG = 2
+NFQNL_CFG_CMD_NONE = 0
+NFQNL_CFG_CMD_BIND = 1
+NFQNL_CFG_CMD_UNBIND = 2
+NFQNL_CFG_CMD_PF_BIND = 3
+NFQNL_CFG_CMD_PF_UNBIND = 4
+NFQNL_COPY_NONE = 0
+NFQNL_COPY_META = 1
+NFQNL_COPY_PACKET = 2
+NFQA_CFG_CMD = 1
+NFQA_CFG_PARAMS = 2
+NFQA_PACKET_HDR = 1
+NFQA_PAYLOAD = 10
+NFQA_VERDICT_HDR = 2
+NF_ACCEPT = 1
+NF_DROP = 0
 
+NLMSG_ERROR = 2
+NLMSG_DONE = 3
+NLM_F_REQUEST = 1
+NLM_F_ACK = 4
 
 from response.verdict import Verdict, decide_verdict
 from response.blocklist import Blocklist
@@ -100,7 +127,16 @@ class InlineEngine:
         logger.info("[InlineEngine] Stopped")
 
     def _run_loop(self):
-        # Primary capture: AF_PACKET raw socket — works on ALL Linux distros.
+        # Attempt 1: NFQUEUE — true inline verdicts (DROP before delivery).
+        # Works on most distros (Mint, Ubuntu, Debian). Fails gracefully on
+        # Kali where nf_tables compat breaks nfnetlink_queue for WiFi.
+        try:
+            self._run_nfqueue_capture()
+            return
+        except Exception as e:
+            logger.warning(f"[InlineEngine] NFQUEUE unavailable ({e}); trying AF_PACKET")
+
+        # Attempt 2: AF_PACKET raw socket — works on ALL Linux distros.
         # No kernel modules, no WiFi breakage. Detection works, blocking
         # uses iptables DROP rules (can't drop the first malicious packet,
         # but blocks subsequent ones from that IP).
@@ -131,11 +167,56 @@ class InlineEngine:
                 self._blocklist.cleanup_expired()
                 last_cleanup = now
 
+    @staticmethod
+    def _detect_interface():
+        """Auto-detect interface with the default route (where internet comes from)."""
+        try:
+            with open("/proc/net/route") as f:
+                for line in f.readlines()[1:]:
+                    parts = line.strip().split()
+                    if len(parts) >= 8 and parts[1] == "00000000":
+                        return parts[0]
+        except Exception:
+            pass
+        try:
+            import netifaces
+            gateways = netifaces.gateways()
+            if "default" in gateways and netifaces.AF_INET in gateways["default"]:
+                return gateways["default"][netifaces.AF_INET][1]
+            interfaces = [i for i in netifaces.interfaces()
+                          if i != "lo" and not i.startswith(("docker", "br-", "veth"))]
+            if interfaces:
+                return interfaces[0]
+        except ImportError:
+            pass
+        try:
+            import psutil
+            stats = psutil.net_if_stats()
+            for name, stat in stats.items():
+                if name != "lo" and stat.isup and not name.startswith(("docker", "br-", "veth")):
+                    return name
+        except ImportError:
+            pass
+        try:
+            import fcntl
+            import struct as s
+            sck = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            buf = s.pack("256s", b"eth0")
+            try:
+                fcntl.ioctl(sck, 0x8927, buf)
+                return "eth0"
+            except OSError:
+                pass
+            sck.close()
+        except Exception:
+            pass
+        return "eth0"
+
     def _get_interface(self):
         return (
             self._config.get("local", {}).get("interface") or
             self._config.get("bridge", {}).get("interfaces", {}).get("wan") or
-            "eth0"
+            self._detect_interface()
         )
 
     def _run_tcpdump_capture(self):
@@ -209,24 +290,27 @@ class InlineEngine:
 
     def _run_raw_capture(self):
         interface = self._get_interface()
-        logger.info(f"[InlineEngine] Raw capture mode on {interface} (FALLBACK — sniff only)")
+        logger.info(f"[InlineEngine] Raw capture mode on {interface}")
         try:
-            import fcntl
             s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
-            ifidx = socket.if_nametoindex(interface)
             s.bind((interface, 0))
             s.settimeout(1.0)
             logger.info(f"[InlineEngine] Bound raw socket to {interface}")
         except Exception as e:
-            logger.warning(f"[InlineEngine] Cannot open raw socket on {interface}: {e}; trying eth0")
-            try:
-                s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
-                s.bind(("eth0", 0))
-                s.settimeout(1.0)
-                interface = "eth0"
-                logger.info("[InlineEngine] Bound raw socket to eth0 (fallback)")
-            except Exception as e2:
-                logger.warning(f"[InlineEngine] Raw socket failed on eth0 too: {e2}")
+            logger.warning(f"[InlineEngine] Cannot open raw socket on {interface}: {e}")
+            fallback = self._detect_interface()
+            if fallback != interface:
+                try:
+                    s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+                    s.bind((fallback, 0))
+                    s.settimeout(1.0)
+                    interface = fallback
+                    logger.info(f"[InlineEngine] Bound raw socket to {fallback} (auto-detected)")
+                except Exception as e2:
+                    logger.warning(f"[InlineEngine] Raw socket failed on {fallback} too: {e2}")
+                    self._run_cleanup_loop()
+                    return
+            else:
                 self._run_cleanup_loop()
                 return
 
@@ -500,6 +584,208 @@ class InlineEngine:
         except Exception as e:
             logger.debug(f"minimal parse error: {e}")
         return None
+
+    def _run_nfqueue_capture(self):
+        queue_num = self._queue_num
+        if not self._setup_nfqueue_nft():
+            raise RuntimeError("Failed to set up nftables queue rule")
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER)
+            sock.bind((os.getpid(), 0))
+            sock.settimeout(1.0)
+            self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET, 0, "PF_BIND AF_INET")
+            self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET6, 0, "PF_BIND AF_INET6")
+            self._nfq_send_config(sock, NFQNL_CFG_CMD_BIND, socket.AF_INET, queue_num, "BIND")
+            self._nfq_set_copy_mode(sock, queue_num, NFQNL_COPY_PACKET, 0xFFFF)
+            logger.info(f"[InlineEngine] NFQUEUE consumer bound to queue {queue_num}")
+        except Exception as e:
+            if sock:
+                sock.close()
+            self._teardown_nfqueue_nft()
+            raise RuntimeError(f"NFQUEUE bind failed: {e}") from e
+        try:
+            self._nfq_recv_loop(sock, queue_num)
+        finally:
+            sock.close()
+            self._teardown_nfqueue_nft()
+
+    def _nfq_send_config(self, sock, cmd, pf, queue_num, label=""):
+        nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_CONFIG
+        cmd_data = struct.pack("=BBH", cmd, 0, pf)
+        attr = self._nfq_nlattr(NFQA_CFG_CMD, cmd_data)
+        nfgen = struct.pack("=BBH", 0, 0, queue_num)
+        payload = nfgen + attr
+        msg = self._nfq_nlmsg(nlm_type, NLM_F_REQUEST | NLM_F_ACK, 1, os.getpid(), payload)
+        sock.send(msg)
+        self._nfq_recv_ack(sock, label)
+
+    def _nfq_set_copy_mode(self, sock, queue_num, copy_mode, copy_range):
+        nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_CONFIG
+        params = struct.pack("=I", copy_range) + struct.pack("=B", copy_mode) + b"\x00\x00\x00"
+        attr = self._nfq_nlattr(NFQA_CFG_PARAMS, params)
+        nfgen = struct.pack("=BBH", 0, 0, queue_num)
+        payload = nfgen + attr
+        msg = self._nfq_nlmsg(nlm_type, NLM_F_REQUEST | NLM_F_ACK, 2, os.getpid(), payload)
+        sock.send(msg)
+        self._nfq_recv_ack(sock, "COPY_MODE")
+
+    def _nfq_recv_ack(self, sock, label=""):
+        data = sock.recv(4096)
+        if len(data) < 16:
+            raise RuntimeError(f"Short ACK response ({label})")
+        _len, _type, _flg, _seq, _pid = struct.unpack("=HHII", data[:16])
+        if _type == NLMSG_ERROR and len(data) >= 20:
+            err = struct.unpack("=i", data[16:20])[0]
+            if err != 0:
+                raise RuntimeError(f"Netlink error ({label}): {os.strerror(abs(err))} (errno={err})")
+
+    @staticmethod
+    def _nfq_nlmsg(msg_type, flags, seq, pid, payload):
+        length = 16 + len(payload)
+        return struct.pack("=HHII", length, msg_type, flags, seq, pid) + payload
+
+    @staticmethod
+    def _nfq_nlattr(attr_type, data):
+        pad = (4 - (len(data) % 4)) % 4
+        length = 4 + len(data) + pad
+        return struct.pack("=HH", length, attr_type) + data + b"\x00" * pad
+
+    def _nfq_recv_loop(self, sock, queue_num):
+        logger.info(f"[InlineEngine] NFQUEUE recv loop started on queue {queue_num}")
+        cleanup_interval = 60
+        last_cleanup = time.time()
+        last_stats = time.time()
+        pkt_batch_count = 0
+        while self._running:
+            try:
+                data = sock.recv(65535)
+            except socket.timeout:
+                now = time.time()
+                if now - last_cleanup > cleanup_interval:
+                    self._connection_tracker.cleanup_stale()
+                    self._stream_reassembler.cleanup_stale()
+                    self._rate_limiter.cleanup_stale()
+                    self._blocklist.cleanup_expired()
+                    last_cleanup = now
+                if now - last_stats > 5 and pkt_batch_count > 0 and self._on_detection_callback:
+                    self._on_detection_callback({"type": "stats", "data": self.get_stats()})
+                    pkt_batch_count = 0
+                    last_stats = now
+                continue
+            packets = self._nfq_parse_messages(data, queue_num)
+            for packet_id, packet in packets:
+                if not packet:
+                    self._nfq_send_verdict(sock, NF_ACCEPT, packet_id, queue_num)
+                    continue
+                with self._lock:
+                    self._packet_count += 1
+                    pkt_batch_count += 1
+                detections = self._run_detection_pipeline(packet)
+                verdict = decide_verdict(detections)
+                nf_verdict = NF_ACCEPT if verdict in (Verdict.PASS, Verdict.RATE_LIMIT) else NF_DROP
+                self._nfq_send_verdict(sock, nf_verdict, packet_id, queue_num)
+                self._apply_verdict(packet_id, verdict, packet, detections, time.time())
+            now = time.time()
+            if now - last_cleanup > cleanup_interval:
+                self._connection_tracker.cleanup_stale()
+                self._stream_reassembler.cleanup_stale()
+                self._rate_limiter.cleanup_stale()
+                self._blocklist.cleanup_expired()
+                last_cleanup = now
+            if now - last_stats > 5 and self._on_detection_callback:
+                self._on_detection_callback({"type": "stats", "data": self.get_stats()})
+                pkt_batch_count = 0
+                last_stats = now
+
+    def _nfq_parse_messages(self, data, queue_num):
+        results = []
+        offset = 0
+        while offset < len(data):
+            if offset + 16 > len(data):
+                break
+            nlmsg_len, nlmsg_type, nlmsg_flags, nlmsg_seq, nlmsg_pid = struct.unpack("=HHII", data[offset:offset + 16])
+            if nlmsg_len < 16 or offset + nlmsg_len > len(data):
+                break
+            payload = data[offset + 16:offset + nlmsg_len]
+            subsys = nlmsg_type >> 8
+            msg_type = nlmsg_type & 0xFF
+            if subsys == NFNL_SUBSYS_QUEUE and msg_type == NFQNL_MSG_PACKET and len(payload) >= 4:
+                nfgen_family, nfgen_version, nfgen_res_id = struct.unpack("=BBH", payload[:4])
+                attr_offset = 4
+                packet_id = None
+                packet_data = None
+                while attr_offset < len(payload):
+                    if attr_offset + 4 > len(payload):
+                        break
+                    nla_len, nla_type = struct.unpack("=HH", payload[attr_offset:attr_offset + 4])
+                    if nla_len < 4 or attr_offset + nla_len > len(payload):
+                        break
+                    nla_data = payload[attr_offset + 4:attr_offset + nla_len]
+                    if nla_type == NFQA_PACKET_HDR and len(nla_data) >= 4:
+                        packet_id = struct.unpack("=I", nla_data[:4])[0]
+                    elif nla_type == NFQA_PAYLOAD:
+                        packet_data = nla_data
+                    attr_offset += (nla_len + 3) & ~3
+                if packet_id is not None:
+                    parsed = self._parse_packet(packet_data) if packet_data else None
+                    results.append((packet_id, parsed))
+            elif nlmsg_type == NLMSG_ERROR and len(payload) >= 4:
+                err = struct.unpack("=i", payload[:4])[0]
+                if err != 0:
+                    logger.warning(f"[InlineEngine] Async netlink error: {os.strerror(abs(err))}")
+            offset += nlmsg_len
+        return results
+
+    def _nfq_send_verdict(self, sock, verdict, packet_id, queue_num):
+        nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_VERDICT
+        vhdr = struct.pack("=II", verdict, packet_id)
+        vhdr_attr = self._nfq_nlattr(NFQA_VERDICT_HDR, vhdr)
+        nfgen = struct.pack("=BBH", 2, 0, queue_num)
+        payload = nfgen + vhdr_attr
+        msg = self._nfq_nlmsg(nlm_type, NLM_F_REQUEST, 0, 0, payload)
+        try:
+            sock.send(msg)
+        except Exception as e:
+            logger.warning(f"[InlineEngine] Failed to send verdict: {e}")
+
+    def _setup_nfqueue_nft(self):
+        interface = self._get_interface()
+        queue_num = self._queue_num
+        try:
+            subprocess.run(["nft", "add", "table", "inet", "lidra_nfqueue"],
+                           capture_output=True, timeout=5)
+            subprocess.run(["nft", "add", "chain", "inet", "lidra_nfqueue", "input",
+                           "{", "type", "filter", "hook", "input", "priority", "0;",
+                           "policy", "accept;", "}"],
+                           capture_output=True, timeout=5)
+            subprocess.run(["nft", "flush", "chain", "inet", "lidra_nfqueue", "input"],
+                           capture_output=True, timeout=5)
+            cmd = ["nft", "add", "rule", "inet", "lidra_nfqueue", "input",
+                   "meta", "iifname", interface,
+                   "queue", "num", str(queue_num)]
+            result = subprocess.run(cmd, capture_output=True, timeout=5)
+            if result.returncode != 0:
+                cmd = ["nft", "add", "rule", "inet", "lidra_nfqueue", "input",
+                       "queue", "num", str(queue_num)]
+                result = subprocess.run(cmd, capture_output=True, timeout=5)
+                if result.returncode != 0:
+                    logger.warning(f"[InlineEngine] nft queue rule failed: {result.stderr.decode()}")
+                    self._teardown_nfqueue_nft()
+                    return False
+            logger.info(f"[InlineEngine] nftables queue {queue_num} on {interface}")
+            return True
+        except Exception as e:
+            logger.warning(f"[InlineEngine] nftables setup error: {e}")
+            self._teardown_nfqueue_nft()
+            return False
+
+    def _teardown_nfqueue_nft(self):
+        try:
+            subprocess.run(["nft", "delete", "table", "inet", "lidra_nfqueue"],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
 
     def get_stats(self) -> Dict:
         with self._lock:
