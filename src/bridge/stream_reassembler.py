@@ -28,6 +28,9 @@ def _stream_key(client_ip: str, server_ip: str, client_port: int, server_port: i
     return (client_ip, server_ip, client_port, server_port)
 
 
+_HTTP_PORTS = {80, 443, 8080, 8081, 8082, 8888, 8000, 8443, 3000, 5000}
+
+
 class StreamReassembler:
     def __init__(self, max_streams: int = 10000):
         self._streams: Dict[_STREAM_KEY, TcpStream] = {}
@@ -82,7 +85,8 @@ class StreamReassembler:
 
     def _extract_messages(self, buffer: bytearray, dst_port: int) -> List[bytes]:
         messages = []
-        if dst_port == 80:
+        if dst_port not in _HTTP_PORTS:
+            return messages
             while True:
                 header_end = buffer.find(b"\r\n\r\n")
                 if header_end == -1:

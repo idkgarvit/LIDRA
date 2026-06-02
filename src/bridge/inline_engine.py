@@ -686,6 +686,10 @@ class InlineEngine:
                 nf_verdict = NF_ACCEPT if verdict in (Verdict.PASS, Verdict.RATE_LIMIT) else NF_DROP
                 self._nfq_send_verdict(sock, nf_verdict, packet_id, queue_num)
                 self._apply_verdict(packet_id, verdict, packet, detections, time.time())
+                if detections:
+                    logger.info(f"[InlineEngine] DETECTED {detections[0]['attack_type']} from {packet.get('src_ip','')} -> verdict={verdict.value}")
+                elif pkt_batch_count % 100 == 0:
+                    logger.debug(f"[InlineEngine] Processed {pkt_batch_count} packets...")
             now = time.time()
             if now - last_cleanup > cleanup_interval:
                 self._connection_tracker.cleanup_stale()

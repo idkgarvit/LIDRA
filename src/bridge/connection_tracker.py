@@ -39,7 +39,9 @@ def _connection_key(pkt: Dict) -> Tuple:
 
 _APP_PROTO_MAP = {80: "http", 443: "tls", 22: "ssh", 53: "dns", 21: "ftp",
                    25: "smtp", 110: "pop3", 143: "imap", 3306: "mysql",
-                   5432: "postgresql", 6379: "redis", 27017: "mongodb"}
+                   5432: "postgresql", 6379: "redis", 27017: "mongodb",
+                   8080: "http", 8081: "http", 8082: "http", 8443: "tls",
+                   8888: "http", 8000: "http", 3000: "http", 5000: "http"}
 
 
 class ConnectionTracker:
