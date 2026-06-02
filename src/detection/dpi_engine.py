@@ -2,6 +2,7 @@ import logging
 import re
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ class DPIEngine:
     def inspect_packet(self, payload: bytes, protocol: str) -> Optional[DPIResult]:
         if not payload:
             return None
-        body = payload.decode("utf-8", errors="replace")
+        body = unquote(payload.decode("utf-8", errors="replace"))
         if self._detect_sqli(body):
             return DPIResult("sql_injection", "critical", f"SQLi detected: {body[:200]}", 0.9, ["T1190"])
         if self._detect_xss(body):
@@ -174,16 +175,18 @@ class DPIEngine:
         uri = parsed.get("uri", "")
         body = parsed.get("body", "")
         ua = parsed.get("headers", {}).get("user-agent", "")
+        decoded_uri = unquote(uri)
+        decoded_body = unquote(body)
 
-        if self._detect_sqli(body) or self._detect_sqli(uri):
+        if self._detect_sqli(decoded_body) or self._detect_sqli(decoded_uri):
             return DPIResult("sql_injection", "critical", f"SQLi in {uri}", 0.9, ["T1190"])
-        if self._detect_xss(body) or self._detect_xss(uri):
+        if self._detect_xss(decoded_body) or self._detect_xss(decoded_uri):
             return DPIResult("xss_attempt", "high", f"XSS in {uri}", 0.85, ["T1190"])
-        if self._detect_cmd_injection(body) or self._detect_cmd_injection(uri):
+        if self._detect_cmd_injection(decoded_body) or self._detect_cmd_injection(decoded_uri):
             return DPIResult("command_injection", "critical", f"CMD injection in {uri}", 0.9, ["T1190"])
-        if self._detect_path_traversal(uri):
+        if self._detect_path_traversal(decoded_uri):
             return DPIResult("path_traversal", "high", f"Path traversal: {uri}", 0.85, ["T1190"])
-        if self._detect_scanner(ua, uri):
+        if self._detect_scanner(ua, decoded_uri):
             return DPIResult("scanner_detected", "low", f"Scanner: {ua}", 0.7, ["T1046"])
 
         return None

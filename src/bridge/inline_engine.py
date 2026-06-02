@@ -468,57 +468,21 @@ class InlineEngine:
                 })
 
     def _parse_packet(self, raw_data: bytes) -> Optional[Dict]:
-        if not raw_data:
+        if not raw_data or len(raw_data) < 14:
             return None
 
         if HAS_DPKT:
             try:
+                first_nibble = raw_data[0] >> 4
+                if first_nibble == 4:
+                    return self._parse_dpkt_ip(raw_data, dpkt.ip.IP)
+                elif first_nibble == 6:
+                    return self._parse_dpkt_ip6(raw_data, dpkt.ip6.IP6)
                 eth = dpkt.ethernet.Ethernet(raw_data)
                 packet = {"raw_len": len(raw_data)}
 
                 if isinstance(eth.data, dpkt.ip.IP):
-                    ip = eth.data
-                    packet["src_ip"] = socket.inet_ntoa(ip.src)
-                    packet["dst_ip"] = socket.inet_ntoa(ip.dst)
-                    packet["protocol"] = {6: "tcp", 17: "udp", 1: "icmp"}.get(ip.p, f"proto_{ip.p}")
-                    packet["frag_offset"] = ip.offset
-                    packet["ttl"] = ip.ttl
-                    packet["payload_len"] = len(ip.data)
-
-                    if isinstance(ip.data, dpkt.tcp.TCP):
-                        tcp = ip.data
-                        packet["src_port"] = tcp.sport
-                        packet["dst_port"] = tcp.dport
-                        packet["tcp_seq"] = tcp.seq
-                        packet["tcp_ack"] = tcp.ack
-                        packet["flags"] = ""
-                        if tcp.flags & dpkt.tcp.TH_SYN:
-                            packet["flags"] += "S"
-                        if tcp.flags & dpkt.tcp.TH_ACK:
-                            packet["flags"] += "A"
-                        if tcp.flags & dpkt.tcp.TH_FIN:
-                            packet["flags"] += "F"
-                        if tcp.flags & dpkt.tcp.TH_RST:
-                            packet["flags"] += "R"
-                        if tcp.flags & dpkt.tcp.TH_PUSH:
-                            packet["flags"] += "P"
-                        if tcp.flags & dpkt.tcp.TH_URG:
-                            packet["flags"] += "U"
-                        packet["payload"] = tcp.data
-
-                    elif isinstance(ip.data, dpkt.udp.UDP):
-                        udp = ip.data
-                        packet["src_port"] = udp.sport
-                        packet["dst_port"] = udp.dport
-                        packet["payload"] = udp.data
-
-                    elif isinstance(ip.data, dpkt.icmp.ICMP):
-                        icmp = ip.data
-                        packet["icmp_type"] = icmp.type
-                        packet["icmp_code"] = icmp.code
-
-                    return packet
-
+                    return self._parse_dpkt_ip_from_eth(eth)
                 elif isinstance(eth.data, dpkt.ip6.IP6):
                     ip6 = eth.data
                     packet["src_ip"] = socket.inet_ntop(socket.AF_INET6, ip6.src)
@@ -534,6 +498,69 @@ class InlineEngine:
             return self._minimal_parse(raw_data)
 
         return None
+
+    def _parse_dpkt_ip(self, raw_data, ip_class):
+        ip = ip_class(raw_data)
+        packet = {"raw_len": len(raw_data)}
+        packet["src_ip"] = socket.inet_ntoa(ip.src)
+        packet["dst_ip"] = socket.inet_ntoa(ip.dst)
+        packet["protocol"] = {6: "tcp", 17: "udp", 1: "icmp"}.get(ip.p, f"proto_{ip.p}")
+        packet["frag_offset"] = ip.offset
+        packet["ttl"] = ip.ttl
+        packet["payload_len"] = len(ip.data)
+        return self._parse_transport(ip, packet)
+
+    def _parse_dpkt_ip6(self, raw_data, ip6_class):
+        ip6 = ip6_class(raw_data)
+        packet = {"raw_len": len(raw_data)}
+        packet["src_ip"] = socket.inet_ntop(socket.AF_INET6, ip6.src)
+        packet["dst_ip"] = socket.inet_ntop(socket.AF_INET6, ip6.dst)
+        packet["protocol"] = "ipv6"
+        packet["payload_len"] = len(ip6.data)
+        return packet
+
+    def _parse_dpkt_ip_from_eth(self, eth):
+        ip = eth.data
+        packet = {"raw_len": len(eth.data) + 14}
+        packet["src_ip"] = socket.inet_ntoa(ip.src)
+        packet["dst_ip"] = socket.inet_ntoa(ip.dst)
+        packet["protocol"] = {6: "tcp", 17: "udp", 1: "icmp"}.get(ip.p, f"proto_{ip.p}")
+        packet["frag_offset"] = ip.offset
+        packet["ttl"] = ip.ttl
+        packet["payload_len"] = len(ip.data)
+        return self._parse_transport(ip, packet)
+
+    def _parse_transport(self, ip, packet):
+        if isinstance(ip.data, dpkt.tcp.TCP):
+            tcp = ip.data
+            packet["src_port"] = tcp.sport
+            packet["dst_port"] = tcp.dport
+            packet["tcp_seq"] = tcp.seq
+            packet["tcp_ack"] = tcp.ack
+            packet["flags"] = ""
+            if tcp.flags & dpkt.tcp.TH_SYN:
+                packet["flags"] += "S"
+            if tcp.flags & dpkt.tcp.TH_ACK:
+                packet["flags"] += "A"
+            if tcp.flags & dpkt.tcp.TH_FIN:
+                packet["flags"] += "F"
+            if tcp.flags & dpkt.tcp.TH_RST:
+                packet["flags"] += "R"
+            if tcp.flags & dpkt.tcp.TH_PUSH:
+                packet["flags"] += "P"
+            if tcp.flags & dpkt.tcp.TH_URG:
+                packet["flags"] += "U"
+            packet["payload"] = tcp.data
+        elif isinstance(ip.data, dpkt.udp.UDP):
+            udp = ip.data
+            packet["src_port"] = udp.sport
+            packet["dst_port"] = udp.dport
+            packet["payload"] = udp.data
+        elif isinstance(ip.data, dpkt.icmp.ICMP):
+            icmp = ip.data
+            packet["icmp_type"] = icmp.type
+            packet["icmp_code"] = icmp.code
+        return packet
 
     def _minimal_parse(self, raw_data: bytes) -> Optional[Dict]:
         try:
