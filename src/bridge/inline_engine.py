@@ -659,9 +659,14 @@ class InlineEngine:
                     if port_attempt == 4:
                         raise
                     continue
-            # Clean up stale bindings before claiming the queue
-            self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_UNBIND, socket.AF_INET, 0, "PF_UNBIND AF_INET")
-            self._nfq_send_config(sock, NFQNL_CFG_CMD_UNBIND, socket.AF_INET, queue_num, "UNBIND")
+            # Clean up stale bindings: best-effort (no ACK), may fail on fresh boot
+            try:
+                self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_UNBIND, socket.AF_INET, 0,
+                                      "PF_UNBIND AF_INET", request_ack=False)
+                self._nfq_send_config(sock, NFQNL_CFG_CMD_UNBIND, socket.AF_INET, queue_num,
+                                      "UNBIND", request_ack=False)
+            except Exception:
+                pass
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET, 0, "PF_BIND AF_INET")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET6, 0, "PF_BIND AF_INET6")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_BIND, socket.AF_INET, queue_num, "BIND")
@@ -678,15 +683,17 @@ class InlineEngine:
             sock.close()
             self._teardown_nfqueue_nft()
 
-    def _nfq_send_config(self, sock, cmd, pf, queue_num, label=""):
+    def _nfq_send_config(self, sock, cmd, pf, queue_num, label="", request_ack=True):
         nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_CONFIG
         cmd_data = struct.pack(">BBH", cmd, 0, pf)
         attr = self._nfq_nlattr(NFQA_CFG_CMD, cmd_data)
         nfgen = struct.pack(">BBH", 0, 0, queue_num)
         payload = nfgen + attr
-        msg = self._nfq_nlmsg(nlm_type, NLM_F_REQUEST | NLM_F_ACK, 1, os.getpid(), payload)
+        flags = NLM_F_REQUEST | (NLM_F_ACK if request_ack else 0)
+        msg = self._nfq_nlmsg(nlm_type, flags, 1, os.getpid(), payload)
         sock.send(msg)
-        self._nfq_recv_ack(sock, label)
+        if request_ack:
+            self._nfq_recv_ack(sock, label)
 
     def _nfq_set_copy_mode(self, sock, queue_num, copy_mode, copy_range):
         nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_CONFIG
