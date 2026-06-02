@@ -1,0 +1,19 @@
+#!/bin/bash
+# LIDRA CLI Launcher
+# Main entry point for LIDRA v3 CLI
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIDRA_BASE="/path/to/LIDRA"
+
+# Add LIDRA base to Python path
+export PYTHONPATH="$LIDRA_BASE:$PYTHONPATH"
+
+# Check if running in Docker
+if [ -f /.dockerenv ]; then
+    cd "$LIDRA_BASE"
+    python3 -m src.cli.main "$@"
+else
+    # Outside Docker - run from project directory
+    cd "$LIDRA_BASE"
+    python3 -m src.cli.main "$@"
+fi

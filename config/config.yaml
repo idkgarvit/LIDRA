@@ -1,19 +1,116 @@
-mode: development
+# LIDRA v3 Production Configuration
+mode: local  # 'inline' (gateway bridge) | 'local' (same-machine) | 'monitor' (legacy)
 log_dir: ./logs
 state_dir: ./state
+
+# Database configuration
+database:
+  path: ./data/lidra.db
+  cleanup_days: 30
+
+# Inline Bridge Mode
+bridge:
+  interfaces:
+    wan: eth0
+    lan: eth1
+  bridge_name: br_lidra
+  management_ip: 10.0.0.1/24
+  stp_enabled: true
+  nfqueue_num: 0
+  nfqueue_maxlen: 1024
+
+# Local (same-machine) mode — iptables INPUT NFQUEUE
+local:
+  interface: eth0
+  nfqueue_num: 0
+  nfqueue_maxlen: 1024
+
+# Inline Engine Configuration
+inline:
+  enabled: true
+  dpi:
+    enabled: true
+    max_reassembly_buffers: 10000
+    stream_timeout_seconds: 300
+  rate_limiting:
+    packets_per_sec: 1000
+    syns_per_sec: 100
+    bytes_per_sec: 10485760
+    window_seconds: 60
+
+# Detection - ALL server attack types
 detection:
   thresholds:
     ssh_failed_attempts: 5
     time_window_seconds: 300
+  log_sources:
+    - /var/log/syslog
+    - /var/log/auth.log
+  enabled_attacks:
+    - ssh_bruteforce
+    - ssh_invalid_user
+    - sql_injection
+    - xss_attempt
+    - path_traversal
+    - lfi_attempt
+    - command_injection
+    - scanner_detected
+    - mysql_bruteforce
+    - smtp_bruteforce
+    - ftp_bruteforce
+    - sudo_failure
+
+# Deception (Honeypot)
 deception:
   honeypot_port: 2222
   honeyfiles:
     - ./state/honey/secret.txt
+  cowrie:
+    enabled: false
+    config_path: ./config/cowrie.cfg
+
+# Response configuration
 response:
   block_command: block_ip.sh
   block_ttl_seconds: 3600
-  dry_run: false
+  dry_run: false  # Set to false for production blocking
+  firewall: nftables  # nftables for bridge mode, iptables for legacy
+
+# Alerting configuration
 alerts:
   slack_webhook: ""
+  discord_webhook: ""
+  email:
+    enabled: false
+    smtp_host: ""
+    smtp_port: 587
+    username: ""
+    password: ""
+    from_addr: ""
+    to_addrs: []
+
+# Threat Intelligence
+threat_intel:
+  abuseipdb_api_key: ""  # Get free key at abuseipdb.com
+  virustotal_api_key: ""  # Get free key at virustotal.com
+  check_on_detect: true
+  auto_report: true
+
+# IP Whitelist (never block these)
 whitelist:
   - 127.0.0.1
+
+# Network Collectors
+collectors:
+  network:
+    enabled: true
+    interface: eth0
+  syslog:
+    enabled: true
+    port: 514
+
+# Terminal UI Configuration
+tui:
+  enabled: true
+  refresh_rate: 4
+  standalone: false  # Set to True to run TUI standalone with mock data

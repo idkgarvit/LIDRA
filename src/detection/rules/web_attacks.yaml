@@ -1,0 +1,174 @@
+# LIDRA v3 Web Attack Detection Rules
+# Sigma-compatible format
+
+rules:
+  - id: lidra-web-sql-001
+    name: SQL Injection Detected
+    severity: critical
+    category: injection
+    description: Detected SQL injection attempt in web request
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(union\\s+select|select\\s+.*\\s+from|insert\\s+into|update\\s+.*\\s+set|delete\\s+from|drop\\s+table|;\\s*--|'\\s*or\\s*'|1\\s*=\\s*1)"
+      field: path
+    mitre:
+      - T1190
+      - T1059
+    actions:
+      - alert
+      - block_ip
+
+  - id: lidra-web-xss-001
+    name: XSS Attempt Detected
+    severity: high
+    category: injection
+    description: Cross-site scripting attempt in web request
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(<script|javascript:|on\\w+\\s*=|onerror|onload|<iframe|<svg)"
+      field: path
+    mitre:
+      - T1189
+    actions:
+      - alert
+
+  - id: lidra-web-path-traversal-001
+    name: Path Traversal Attempt
+    severity: high
+    category: file_access
+    description: Directory traversal attempt in web request
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(\\.\\./|\\.\\.\\\\|%2e%2e%2f|%2e%2e/|\\.\\.%2f|%2e%2e%5c)"
+      field: path
+    mitre:
+      - T1190
+    actions:
+      - alert
+
+  - id: lidra-web-lfi-001
+    name: Local File Inclusion
+    severity: critical
+    category: file_access
+    description: Attempt to access local files via web
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(etc/passwd|etc/shadow|proc/self|\\.\\./\\.\\./)"
+      field: path
+    mitre:
+      - T1190
+      - T1005
+    actions:
+      - alert
+      - block_ip
+
+  - id: lidra-web-rfi-001
+    name: Remote File Inclusion
+    severity: critical
+    category: file_access
+    description: Attempt to include remote files
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(php://|file://|http://|https://|data://)"
+      field: path
+    mitre:
+      - T1190
+    actions:
+      - alert
+
+  - id: lidra-web-cmd-001
+    name: Command Injection Attempt
+    severity: critical
+    category: injection
+    description: Attempt to inject OS commands via web
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(;\\s*\\w+|&&\\s*\\w+|\\|\\s*\\w+|`[^`]+`|\\$\\([^)]+\\))"
+      field: path
+    mitre:
+      - T1059
+      - T1190
+    actions:
+      - alert
+      - block_ip
+
+  - id: lidra-web-ssrf-001
+    name: SSRF Attempt
+    severity: high
+    category: injection
+    description: Server-side request forgery attempt
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(127\\.0\\.0\\.1|localhost|169\\.254\\.169\\.254|metadata\\.google)"
+      field: path
+    mitre:
+      - T1190
+    actions:
+      - alert
+
+  - id: lidra-web-admin-001
+    name: Admin Panel Probe
+    severity: low
+    category: reconnaissance
+    description: Access to administrative interfaces
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(/admin|/wp-admin|/phpmyadmin|/manager|/console|/solr|/actuator|/.env|/config\\.php|/wp-config)"
+      field: path
+    mitre:
+      - T1086
+    actions:
+      - alert
+
+  - id: lidra-web-scanner-001
+    name: Security Scanner Detected
+    severity: low
+    category: reconnaissance
+    description: Known security scanner user agent
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(nikto|nmap|sqlmap|dirbuster|gobuster|wpscan|nuclei|masscan|zgrab|acunetix|burp)"
+      field: user_agent
+    mitre:
+      - T1595
+    actions:
+      - alert
+
+  - id: lidra-web-xxe-001
+    name: XXE Attempt
+    severity: critical
+    category: injection
+    description: XML External Entity injection
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(<!DOCTYPE|<!ENTITY|ENTITY|SYSTEM|PUBLIC)"
+      field: path
+    mitre:
+      - T1190
+    actions:
+      - alert
+
+  - id: lidra-web-deser-001
+    name: Deserialization Attack
+    severity: critical
+    category: injection
+    description: Attempt to exploit deserialization
+    enabled: true
+    condition:
+      type: pattern
+      pattern: "(base64_decode|eval\\(|unserialize|ObjectInputStream|__construct)"
+      field: path
+    mitre:
+      - T1059
+    actions:
+      - alert

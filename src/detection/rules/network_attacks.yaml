@@ -1,0 +1,148 @@
+# LIDRA v3 Network Attack Detection Rules
+
+rules:
+  - id: lidra-net-portscan-001
+    name: Port Scan Detected
+    severity: medium
+    category: reconnaissance
+    description: Multiple ports scanned in short time window
+    enabled: true
+    condition:
+      type: composite
+      logic: and
+      conditions:
+        - type: field
+          field: event_type
+          operator: equals
+          value: connect
+        - type: field
+          field: connection_count
+          operator: gt
+          value: 10
+    mitre:
+      - T1595
+      - T1082
+    actions:
+      - alert
+      - block_ip
+
+  - id: lidra-net-synflood-001
+    name: SYN Flood Detection
+    severity: high
+    category: dos
+    description: Excessive SYN packets detected
+    enabled: true
+    condition:
+      type: field
+      field: syn_count
+      operator: gt
+      value: 100
+    mitre:
+      - T1498
+    actions:
+      - alert
+
+  - id: lidra-net-smb-pentest-001
+    name: SMB Enumeration
+    severity: medium
+    category: reconnaissance
+    description: SMB share enumeration detected
+    enabled: true
+    condition:
+      type: pattern
+      field: dst_port
+      pattern: "(445|139)"
+    mitre:
+      - T1021
+      - T1040
+    actions:
+      - alert
+
+  - id: lidra-net-ldap-enum-001
+    name: LDAP Enumeration
+    severity: medium
+    category: reconnaissance
+    description: LDAP directory enumeration
+    enabled: true
+    condition:
+      type: pattern
+      field: dst_port
+      pattern: "389"
+    mitre:
+      - T1087
+      - T1082
+    actions:
+      - alert
+
+  - id: lidra-net-dns-tunnel-001
+    name: DNS Tunneling Indicator
+    severity: high
+    category: exfiltration
+    description: Possible DNS tunneling for data exfil
+    enabled: true
+    condition:
+      type: composite
+      logic: and
+      conditions:
+        - type: field
+          field: dst_port
+          operator: equals
+          value: 53
+        - type: field
+          field: dns_query_length
+          operator: gt
+          value: 200
+    mitre:
+      - T1573
+      - T1041
+    actions:
+      - alert
+
+  - id: lidra-net-ftp-anon-001
+    name: FTP Anonymous Login
+    severity: low
+    category: misconfiguration
+    description: Anonymous FTP access attempt
+    enabled: true
+    condition:
+      type: field
+      field: username
+      operator: equals
+      value: anonymous
+    mitre:
+      - T1078
+    actions:
+      - alert
+
+  - id: lidra-net-telnet-001
+    name: Telnet Usage
+    severity: medium
+    category: insecure_protocol
+    description: Insecure telnet protocol detected
+    enabled: true
+    condition:
+      type: field
+      field: dst_port
+      operator: equals
+      value: 23
+    mitre:
+      - T1072
+    actions:
+      - alert
+
+  - id: lidra-net-ftp-brute-001
+    name: FTP Brute Force
+    severity: high
+    category: credential_attack
+    description: Multiple failed FTP login attempts
+    enabled: true
+    condition:
+      type: field
+      field: failed_attempts
+      operator: gt
+      value: 5
+    mitre:
+      - T1110
+    actions:
+      - alert
+      - block_ip

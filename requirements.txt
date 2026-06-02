@@ -1,0 +1,42 @@
+# LIDRA v3 Requirements
+# Core dependencies
+pyyaml>=6.0
+psutil>=5.9.0
+rich>=13.0.0
+
+# Database
+# SQLite is built-in
+
+# HTTP/API
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+
+# Threat Intelligence
+requests>=2.31.0
+
+# eBPF (optional - will fallback to log-based if unavailable)
+# Note: Requires BCC library and kernel headers on host
+# bcc>=0.25.0  # Uncomment if running with eBPF support
+
+# Cloud collectors (optional)
+# boto3>=1.34.0   # AWS CloudTrail
+# kubernetes>=28.0.0  # K8s
+
+# Output formatters
+python-json-logger>=2.0.0
+
+# Inline Bridge Mode
+dpkt>=1.9.0
+
+# nfqueue (optional - for native NFQUEUE bindings)
+# python3-nfqueue>=0.8  # Uncomment if using NFQUEUE with nfqueue python bindings
+
+# DNS parsing for DPI
+dnspython>=2.6.0
+
+# Testing
+pytest>=9.0.0
+pytest-asyncio>=0.23.0
+textual>=0.41.0

@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  lidra:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: lidra-core
+    hostname: lidra
+    
+    # eBPF requires privileged mode or specific capabilities
+    privileged: true
+    
+    environment:
+      - LIDRA_MODE=production
+      - LIDRA_DRY_RUN=false
+      - PYTHONUNBUFFERED=1
+    
+    volumes:
+      # Read system logs (required for detection)
+      - /var/log:/var/log:ro
+      
+      # Config directory
+      - ../config:/opt/lidra/config:ro
+      
+      # Data persistence
+      - lidra-data:/opt/lidra/data
+      - lidra-logs:/opt/lidra/logs
+      - lidra-state:/opt/lidra/state
+      
+      # Mount for potential auditd
+      - /etc:/etc:ro
+      - /proc:/proc:ro
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+    
+    network_mode: host
+    
+    restart: unless-stopped
+    
+    cap_add:
+      - SYS_ADMIN
+      - SYS_PTRACE
+      - NET_ADMIN
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Elasticsearch for centralized logging
+  # elasticsearch:
+  #   image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+  #   container_name: lidra-elasticsearch
+  #   environment:
+  #     - discovery.type=single-node
+  #     - xpack.security.enabled=false
+  #     - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+  #   volumes:
+  #     - elasticsearch-data:/usr/share/elasticsearch/data
+  #   ports:
+  #     - "9200:9200"
+  #   networks:
+  #     - lidra-net
+
+  # Optional: Kibana for visualization
+  # kibana:
+  #   image: docker.elastic.co/kibana/kibana:8.11.0
+  #   container_name: lidra-kibana
+  #   depends_on:
+  #     - elasticsearch
+  #   environment:
+  #     - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+  #   ports:
+  #     - "5601:5601"
+  #   networks:
+  #     - lidra-net
+
+volumes:
+  lidra-data:
+  lidra-logs:
+  lidra-state:
+  # elasticsearch-data:
+
+# networks:
+#   lidra-net:
+#     driver: bridge
