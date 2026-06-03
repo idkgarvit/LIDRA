@@ -170,29 +170,6 @@ class DPIEngine:
         suspicious = _get_suspicious_sni_patterns()
         return any(s in sni.lower() for s in suspicious)
 
-
-_SUSPICIOUS_SNI_PATTERNS = None
-
-
-def _get_suspicious_sni_patterns():
-    global _SUSPICIOUS_SNI_PATTERNS
-    if _SUSPICIOUS_SNI_PATTERNS is not None:
-        return _SUSPICIOUS_SNI_PATTERNS
-    import yaml
-    from pathlib import Path
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    default = [".xyz", ".tk", ".ml", ".ga", ".cf", "malware", "phish", "c2", "botnet",
-               "reverse", "shell", "ransom", "crypt", "exploit"]
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        patterns = cfg.get("suspicious_sni_patterns", [])
-        if patterns:
-            _SUSPICIOUS_SNI_PATTERNS = patterns
-    if _SUSPICIOUS_SNI_PATTERNS is None:
-        _SUSPICIOUS_SNI_PATTERNS = default
-    return _SUSPICIOUS_SNI_PATTERNS
-
     def _check_web_attack(self, parsed: Dict) -> Optional[DPIResult]:
         uri = parsed.get("uri", "")
         body = parsed.get("body", "")
@@ -249,6 +226,29 @@ def _get_suspicious_sni_patterns():
                         patterns["scanner_signature"].search(uri))
         scanner_agents = _get_scanner_agents()
         return any(s in ua.lower() for s in scanner_agents)
+
+
+_SUSPICIOUS_SNI_PATTERNS = None
+
+
+def _get_suspicious_sni_patterns():
+    global _SUSPICIOUS_SNI_PATTERNS
+    if _SUSPICIOUS_SNI_PATTERNS is not None:
+        return _SUSPICIOUS_SNI_PATTERNS
+    import yaml
+    from pathlib import Path
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    default = [".xyz", ".tk", ".ml", ".ga", ".cf", "malware", "phish", "c2", "botnet",
+               "reverse", "shell", "ransom", "crypt", "exploit"]
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        patterns = cfg.get("suspicious_sni_patterns", [])
+        if patterns:
+            _SUSPICIOUS_SNI_PATTERNS = patterns
+    if _SUSPICIOUS_SNI_PATTERNS is None:
+        _SUSPICIOUS_SNI_PATTERNS = default
+    return _SUSPICIOUS_SNI_PATTERNS
 
 
 _SCANNER_AGENTS = None

@@ -13,8 +13,19 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Callable
 from dataclasses import dataclass, asdict
+import yaml
 
 logger = logging.getLogger(__name__)
+
+
+def _get_config_list(key, default):
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get(key, default)
+    except Exception:
+        return default
 
 
 @dataclass
@@ -307,19 +318,6 @@ class EBPFTracer:
             'running': self.running,
             'source': 'kernel' if not self.fallback_mode else 'log_files'
         }
-
-
-import yaml
-
-
-def _get_config_list(key, default):
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    try:
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        return cfg.get(key, default)
-    except Exception:
-        return default
 
 
 class EBPFDetector:
