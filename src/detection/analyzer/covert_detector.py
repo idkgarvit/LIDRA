@@ -15,7 +15,7 @@ class CovertDetector:
         thresholds = (config or {}).get("thresholds", {}) if config else {}
         self._seq_threshold = thresholds.get("seq_covert_chars", 8)
         self._seq_samples = thresholds.get("seq_covert_samples", 10)
-        self._ack_threshold = thresholds.get("ack_covert_chars", 6)
+        self._ack_threshold = thresholds.get("ack_covert_chars", 15)
         self._ack_samples = thresholds.get("ack_covert_samples", 10)
         self._ttl_window = thresholds.get("ttl_covert_window", 15)
         self._ttl_variations = thresholds.get("ttl_covert_variations", 6)
