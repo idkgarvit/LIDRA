@@ -734,18 +734,9 @@ class LIDRAv3:
     def _run_local_mode(self):
         logger.info("=" * 60)
 
-        local_cfg = self.config.get('local', {})
-        queue_num = local_cfg.get('nfqueue_num', 0)
-
-        # 1. Ensure NFQUEUE kernel module is loaded
-        nfqueue_ok = self._ensure_nfqueue_module()
-
-        # 2. Add NFQUEUE iptables rule (safe: TCP NEW only, with --queue-bypass)
-        if nfqueue_ok:
-            self.firewall.setup_local_iptables(queue_num)
-        else:
-            logger.warning("[NFQUEUE] Module not available — will use passive detection")
-
+        # In local mode, use AF_PACKET + iptables DROP rules.
+        # NFQUEUE + nftables breaks WiFi on Kali — skip entirely.
+        # The inline engine's _run_loop already skips NFQUEUE in local mode.
         if self.inline_engine:
             self.inline_engine.start()
             logger.info("[InlineEngine] Packet processing started")
