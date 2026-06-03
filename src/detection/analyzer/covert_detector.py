@@ -14,7 +14,9 @@ class CovertDetector:
         self._last_cleanup = time.time()
         thresholds = (config or {}).get("thresholds", {}) if config else {}
         self._seq_threshold = thresholds.get("seq_covert_chars", 8)
+        self._seq_samples = thresholds.get("seq_covert_samples", 10)
         self._ack_threshold = thresholds.get("ack_covert_chars", 6)
+        self._ack_samples = thresholds.get("ack_covert_samples", 10)
         self._ttl_window = thresholds.get("ttl_covert_window", 15)
         self._ttl_variations = thresholds.get("ttl_covert_variations", 6)
 
@@ -56,7 +58,7 @@ class CovertDetector:
         last_bytes = seq & 0xFF
         self._seq_anomalies[ip].append(last_bytes)
         recent = self._seq_anomalies[ip][-25:]
-        if len(recent) >= 10:
+        if len(recent) >= self._seq_samples:
             chars = []
             for i in range(len(recent) - 1):
                 diff = (recent[i + 1] - recent[i]) & 0xFF
@@ -74,7 +76,7 @@ class CovertDetector:
         last_bytes = ack & 0xFF
         self._ack_anomalies[ip].append(last_bytes)
         recent = self._ack_anomalies[ip][-25:]
-        if len(recent) >= 10:
+        if len(recent) >= self._ack_samples:
             chars = []
             for i in range(len(recent) - 1):
                 diff = (recent[i + 1] - recent[i]) & 0xFF

@@ -91,7 +91,9 @@ thresholds:
   threat_score_drop: 70
   threat_score_log: 40
   seq_covert_chars: 8
+  seq_covert_samples: 10
   ack_covert_chars: 6
+  ack_covert_samples: 10
   ttl_covert_window: 15
   ttl_covert_variations: 6
 
