@@ -28,7 +28,26 @@ def _stream_key(client_ip: str, server_ip: str, client_port: int, server_port: i
     return (client_ip, server_ip, client_port, server_port)
 
 
-_HTTP_PORTS = {80, 443, 8080, 8081, 8082, 8888, 8000, 8443, 3000, 5000}
+_HTTP_PORTS = None
+
+
+def _get_http_ports():
+    global _HTTP_PORTS
+    if _HTTP_PORTS is not None:
+        return _HTTP_PORTS
+    import yaml
+    from pathlib import Path
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    default = {80, 443, 8080, 8081, 8082, 8888, 8000, 8443, 3000, 5000}
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        ports = cfg.get("http_ports", [])
+        if ports:
+            _HTTP_PORTS = set(ports)
+    if _HTTP_PORTS is None:
+        _HTTP_PORTS = default
+    return _HTTP_PORTS
 
 
 class StreamReassembler:
@@ -85,7 +104,7 @@ class StreamReassembler:
 
     def _extract_messages(self, buffer: bytearray, dst_port: int) -> List[bytes]:
         messages = []
-        if dst_port not in _HTTP_PORTS:
+        if dst_port not in _get_http_ports():
             return messages
         while True:
                 header_end = buffer.find(b"\r\n\r\n")

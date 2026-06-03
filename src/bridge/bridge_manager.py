@@ -1,14 +1,19 @@
 import logging
 import subprocess
+import sys
+from pathlib import Path
 from typing import Optional, Dict, List
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.interface import detect_interface
 
 logger = logging.getLogger(__name__)
 
 class BridgeManager:
     def __init__(self, config: dict):
         self._config = config.get("bridge", {})
-        self._wan = self._config.get("interfaces", {}).get("wan", "eth0")
-        self._lan = self._config.get("interfaces", {}).get("lan", "eth1")
+        self._wan = self._config.get("interfaces", {}).get("wan") or detect_interface()
+        self._lan = self._config.get("interfaces", {}).get("lan") or detect_interface()
         self._bridge_name = self._config.get("bridge_name", "br_lidra")
         self._mgmt_ip = self._config.get("management_ip", "10.0.0.1/24")
         self._stp_enabled = self._config.get("stp_enabled", True)
@@ -110,7 +115,7 @@ class BridgeManager:
 
     def reload_config(self, config: dict):
         self._config = config.get("bridge", {})
-        self._wan = self._config.get("interfaces", {}).get("wan", "eth0")
-        self._lan = self._config.get("interfaces", {}).get("lan", "eth1")
+        self._wan = self._config.get("interfaces", {}).get("wan") or detect_interface()
+        self._lan = self._config.get("interfaces", {}).get("lan") or detect_interface()
         self._stp_enabled = self._config.get("stp_enabled", True)
         logger.info("[Bridge] Config reloaded")

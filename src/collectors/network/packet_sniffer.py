@@ -34,10 +34,45 @@ COMMON_PORTS = {
     6379: "Redis", 27017: "MongoDB", 8080: "HTTP-ALT", 21: "FTP"
 }
 
-# Suspicious patterns
-SYN_FLOOD_THRESHOLD = 50  # SYN packets per second
-PORT_SCAN_THRESHOLD = 10  # Different ports in short time
-DNS_QUERY_THRESHOLD = 100  # Queries per minute
+# Suspicious patterns — loaded from config with fallbacks
+_THRESHOLDS = None
+_SUSPICIOUS_PORTS = None
+
+
+def _get_thresholds():
+    global _THRESHOLDS
+    if _THRESHOLDS is not None:
+        return _THRESHOLDS
+    import yaml
+    from pathlib import Path
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    default = {"syn_flood": 50, "port_scan": 10, "icmp_flood": 50, "dns_query": 100}
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        _THRESHOLDS = cfg.get("thresholds", default)
+    if _THRESHOLDS is None:
+        _THRESHOLDS = default
+    return _THRESHOLDS
+
+
+def _get_suspicious_ports():
+    global _SUSPICIOUS_PORTS
+    if _SUSPICIOUS_PORTS is not None:
+        return _SUSPICIOUS_PORTS
+    import yaml
+    from pathlib import Path
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    default = [4444, 5555, 31337, 1337]
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        ports = cfg.get("suspicious_ports", [])
+        if ports:
+            _SUSPICIOUS_PORTS = ports
+    if _SUSPICIOUS_PORTS is None:
+        _SUSPICIOUS_PORTS = default
+    return _SUSPICIOUS_PORTS
 
 
 @dataclass
@@ -62,10 +97,10 @@ class PacketSniffer:
     2. Promiscuous mode (requires root/libpcap)
     """
 
-    def __init__(self, interface: str = "eth0", callback: Optional[Callable] = None, config: dict = None):
-        self.interface = interface
-        self.callback = callback
+    def __init__(self, interface: str = None, callback: Optional[Callable] = None, config: dict = None):
         self.config = config or {}
+        self.interface = interface or self.config.get("collectors", {}).get("network", {}).get("interface", "eth0")
+        self.callback = callback
         self.running = False
         self.thread = None
         self.socket = None
@@ -217,7 +252,7 @@ class PacketSniffer:
         attacks = []
 
         # Skip private IPs
-        if packet.src_ip.startswith(("10.", "172.16.", "172.17.", "192.168.", "127.")):
+        if packet.src_ip.startswith(("10.", "172.", "192.168.", "127.")):
             return None
 
         # SYN Flood Detection
@@ -229,7 +264,7 @@ class PacketSniffer:
                 t for t in self.syn_tracker[packet.src_ip]
                 if now - t < 5  # Last 5 seconds
             ]
-            if len(self.syn_tracker[packet.src_ip]) > SYN_FLOOD_THRESHOLD:
+            if len(self.syn_tracker[packet.src_ip]) > _get_thresholds().get("syn_flood", 50):
                 attacks.append({
                     "type": "syn_flood",
                     "severity": "critical",
@@ -241,7 +276,7 @@ class PacketSniffer:
         # Port Scan Detection
         if packet.flags in ["SYN", None] and packet.dst_port > 0:
             self.port_scan_tracker[packet.src_ip].add(packet.dst_port)
-            if len(self.port_scan_tracker[packet.src_ip]) > PORT_SCAN_THRESHOLD:
+            if len(self.port_scan_tracker[packet.src_ip]) > _get_thresholds().get("port_scan", 10):
                 attacks.append({
                     "type": "port_scan",
                     "severity": "high",
@@ -258,7 +293,7 @@ class PacketSniffer:
                 t for t in self.dns_query_tracker[packet.src_ip]
                 if now - t < 10
             ]
-            if len(self.dns_query_tracker[packet.src_ip]) > 50:
+            if len(self.dns_query_tracker[packet.src_ip]) > _get_thresholds().get("icmp_flood", 50):
                 attacks.append({
                     "type": "icmp_flood",
                     "severity": "high",
@@ -267,8 +302,7 @@ class PacketSniffer:
                 })
 
         # Suspicious Port Access
-        suspicious_ports = [4444, 5555, 31337, 1337]  # Metasploit, etc.
-        if packet.dst_port in suspicious_ports:
+        if packet.dst_port in _get_suspicious_ports():
             attacks.append({
                 "type": "suspicious_port",
                 "severity": "high",
@@ -297,7 +331,7 @@ class PacketSniffer:
         return self.stats.copy()
 
 
-def create_sniffer(interface: str = "eth0", callback: Optional[Callable] = None, config: dict = None) -> PacketSniffer:
+def create_sniffer(interface: str = None, callback: Optional[Callable] = None, config: dict = None) -> PacketSniffer:
     """Factory function to create packet sniffer."""
     return PacketSniffer(interface=interface, callback=callback, config=config)
 

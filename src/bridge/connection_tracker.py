@@ -37,11 +37,29 @@ def _connection_key(pkt: Dict) -> Tuple:
     )
 
 
-_APP_PROTO_MAP = {80: "http", 443: "tls", 22: "ssh", 53: "dns", 21: "ftp",
-                   25: "smtp", 110: "pop3", 143: "imap", 3306: "mysql",
-                   5432: "postgresql", 6379: "redis", 27017: "mongodb",
-                   8080: "http", 8081: "http", 8082: "http", 8443: "tls",
-                   8888: "http", 8000: "http", 3000: "http", 5000: "http"}
+_APP_PROTO_MAP = None
+
+
+def _get_proto_map():
+    global _APP_PROTO_MAP
+    if _APP_PROTO_MAP is not None:
+        return _APP_PROTO_MAP
+    import yaml
+    from pathlib import Path
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    default = {80: "http", 443: "tls", 22: "ssh", 53: "dns", 21: "ftp",
+               25: "smtp", 110: "pop3", 143: "imap", 3306: "mysql",
+               5432: "postgresql", 6379: "redis", 27017: "mongodb",
+               8080: "http", 8081: "http", 8082: "http", 8443: "tls",
+               8888: "http", 8000: "http", 3000: "http", 5000: "http"}
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        raw = cfg.get("service_port_map", {})
+        _APP_PROTO_MAP = {int(k) if isinstance(k, str) and k.isdigit() else k: v for k, v in raw.items()}
+    if _APP_PROTO_MAP is None:
+        _APP_PROTO_MAP = default
+    return _APP_PROTO_MAP
 
 
 class ConnectionTracker:
@@ -84,8 +102,8 @@ class ConnectionTracker:
                     created=now,
                     last_seen=now,
                 )
-                dst_port_key = dst_port if dst_port in _APP_PROTO_MAP else src_port
-                conn.app_protocol = _APP_PROTO_MAP.get(dst_port_key, "")
+                dst_port_key = dst_port if dst_port in _get_proto_map() else src_port
+                conn.app_protocol = _get_proto_map().get(dst_port_key, "")
                 self._connections[key] = conn
 
             conn.last_seen = now

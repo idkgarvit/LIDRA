@@ -14,10 +14,15 @@ logger = logging.getLogger(__name__)
 class FirewallManager:
     """Manages iptables/nftables firewall rules."""
 
-    def __init__(self, backend: str = "iptables", dry_run: bool = False):
+    def __init__(self, backend: str = "iptables", dry_run: bool = False, config: dict = None):
         self.backend = backend
         self.dry_run = dry_run
-        self.chain = "LIDRA_BLOCK"
+        self._config = config or {}
+        nft_cfg = self._config.get("nftables", {})
+        self.chain = nft_cfg.get("block_chain", "LIDRA_BLOCK")
+        self.NFT_BRIDGE_TABLE = nft_cfg.get("bridge_table", "lidra_bridge")
+        self.NFT_BRIDGE_FORWARD_CHAIN = nft_cfg.get("bridge_forward_chain", "lidra_forward")
+        self.NFT_BRIDGE_INPUT_CHAIN = nft_cfg.get("bridge_input_chain", "lidra_input")
         self._nft_lock = threading.Lock()
         if not dry_run:
             self._ensure_chain()
@@ -139,10 +144,6 @@ class FirewallManager:
         return bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', s))
 
     # --- Bridge / nftables methods ---
-
-    NFT_BRIDGE_TABLE = "lidra_bridge"
-    NFT_BRIDGE_FORWARD_CHAIN = "lidra_forward"
-    NFT_BRIDGE_INPUT_CHAIN = "lidra_input"
 
     def _run_nft(self, args: list, check: bool = True) -> subprocess.CompletedProcess:
         cmd = ["nft"] + args

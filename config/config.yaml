@@ -11,8 +11,8 @@ database:
 # Inline Bridge Mode
 bridge:
   interfaces:
-    wan: eth0
-    lan: eth1
+    wan: null  # auto-detect if null
+    lan: null  # auto-detect if null
   bridge_name: br_lidra
   management_ip: 10.0.0.1/24
   stp_enabled: true
@@ -21,7 +21,7 @@ bridge:
 
 # Local (same-machine) mode — iptables INPUT NFQUEUE
 local:
-  interface: eth0
+  interface: null  # auto-detect if null
   nfqueue_num: 0
   nfqueue_maxlen: 1024
 
@@ -37,6 +37,148 @@ inline:
     syns_per_sec: 100
     bytes_per_sec: 10485760
     window_seconds: 60
+
+# Service port → protocol mapping (was hardcoded in connection_tracker.py)
+service_port_map:
+  80: http
+  443: tls
+  22: ssh
+  53: dns
+  21: ftp
+  25: smtp
+  110: pop3
+  143: imap
+  3306: mysql
+  5432: postgresql
+  6379: redis
+  27017: mongodb
+  8080: http
+  8081: http
+  8082: http
+  8443: tls
+  8888: http
+  8000: http
+  3000: http
+  5000: http
+
+# HTTP ports for stream reassembly (was hardcoded in stream_reassembler.py)
+http_ports:
+  - 80
+  - 443
+  - 8080
+  - 8081
+  - 8082
+  - 8888
+  - 8000
+  - 8443
+  - 3000
+  - 5000
+
+# Suspicious ports (was hardcoded in packet_sniffer.py)
+suspicious_ports:
+  - 4444
+  - 5555
+  - 31337
+  - 1337
+
+# Detection thresholds (was hardcoded in multiple files)
+thresholds:
+  syn_flood: 100
+  port_scan: 20
+  icmp_flood: 50
+  dns_query: 100
+  brute_force: 5
+  threat_score_drop: 70
+  threat_score_log: 40
+
+# Timeouts (was hardcoded in multiple files)
+timeouts:
+  cleanup_interval: 60
+  socket_timeout: 1.0
+  subprocess_timeout: 5
+  nft_timeout: 15
+  stream_timeout: 300
+  tracking_window: 10
+  cooldown: 60
+  cleanup_hour: 3
+
+# nftables naming (was hardcoded in firewall.py and inline_engine.py)
+nftables:
+  queue_table: lidra_nfqueue
+  bridge_table: lidra_bridge
+  bridge_forward_chain: lidra_forward
+  bridge_input_chain: lidra_input
+  block_chain: LIDRA_BLOCK
+
+# Scanner user-agent detection list (was hardcoded in dpi_engine.py)
+scanner_agents:
+  - nikto
+  - nmap
+  - sqlmap
+  - dirbuster
+  - gobuster
+  - wpscan
+  - nuclei
+  - masscan
+  - zgrab
+  - burp
+  - acunetix
+
+# Suspicious SNI patterns (was hardcoded in dpi_engine.py)
+suspicious_sni_patterns:
+  - ".xyz"
+  - ".tk"
+  - ".ml"
+  - ".ga"
+  - ".cf"
+  - "malware"
+  - "phish"
+  - "c2"
+  - "botnet"
+  - "reverse"
+  - "shell"
+  - "ransom"
+  - "crypt"
+  - "exploit"
+
+# Suspicious commands (was hardcoded in ebpf/tracer.py)
+suspicious_commands:
+  - wget
+  - curl
+  - nc
+  - ncat
+  - bash -i
+  - sh -i
+  - python.*socket
+  - mkfifo
+
+# Suspicious file extensions (was hardcoded in ebpf/tracer.py)
+suspicious_extensions:
+  - .php
+  - .exe
+  - .sh
+  - .pl
+  - .py
+  - .rb
+  - .jar
+
+# Suspicious paths (was hardcoded in ebpf/tracer.py)
+suspicious_paths:
+  - /tmp/
+  - /var/tmp/
+  - /dev/shm/
+  - /proc/self/
+  - /.ssh/
+  - /.aws/
+
+# Sensitive paths (was hardcoded in ebpf/tracer.py)
+sensitive_paths:
+  - /etc/passwd
+  - /etc/shadow
+  - /.ssh/
+  - /.aws/
+  - /var/log/
+  - /proc/self/
 
 # Detection - ALL server attack types
 detection:
@@ -104,7 +246,7 @@ whitelist:
 collectors:
   network:
     enabled: true
-    interface: eth0
+    interface: null  # auto-detect if null
   syslog:
     enabled: true
     port: 514
@@ -114,3 +256,6 @@ tui:
   enabled: true
   refresh_rate: 4
   standalone: false  # Set to True to run TUI standalone with mock data
+
+dashboard:
+  port: 9090  # Web dashboard port (avoid 8080 conflict with bridge server)

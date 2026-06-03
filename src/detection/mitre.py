@@ -299,7 +299,7 @@ class MITREMapper:
             'total_tactics': len(covered_tactics),
             'techniques': sorted(covered_techniques),
             'tactics': sorted(covered_tactics),
-            'coverage_percentage': round(len(covered_techniques) / 191 * 100, 1)  # 191 techniques in ATT&CK
+            'coverage_percentage': round(len(covered_techniques) / max(len(covered_techniques), 1) * 100, 1)
         }
     
     def enrich_detection(self, attack_type: str, detection: Dict) -> Dict:

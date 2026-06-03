@@ -44,6 +44,7 @@ from ebpf import EBPFTracer, EBPFDetector, create_tracer
 from dashboard.cli import create_cli_dashboard
 from collectors.network import create_sniffer
 from collectors.syslog import create_syslog_server
+from utils.interface import detect_interface
 
 try:
     from bridge.inline_engine import InlineEngine
@@ -277,7 +278,7 @@ class LIDRAv3:
         syslog_enabled = collectors.get('syslog', {}).get('enabled', True)
 
         if network_enabled:
-            interface = collectors.get('network', {}).get('interface', 'eth0')
+            interface = collectors.get('network', {}).get('interface') or detect_interface()
             self.sniffer = create_sniffer(interface=interface, callback=self._on_network_event)
             logger.info(f"[Network] Packet sniffer ready (interface: {interface})")
 
@@ -520,13 +521,14 @@ class LIDRAv3:
         try:
             from dashboard.main import app
             import uvicorn
+            dash_port = self.config.get("dashboard", {}).get("port", 9090)
             
             def run_dashboard():
-                uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")
+                uvicorn.run(app, host="0.0.0.0", port=dash_port, log_level="warning")
             
             self.dashboard_thread = threading.Thread(target=run_dashboard, daemon=True)
             self.dashboard_thread.start()
-            logger.info("[Dashboard] http://0.0.0.0:8080")
+            logger.info(f"[Dashboard] http://0.0.0.0:{dash_port}")
         except Exception as e:
             logger.warning(f"Dashboard not started: {e}")
     
@@ -603,9 +605,9 @@ class LIDRAv3:
                         self.config.get('bridge', {}).get('nfqueue_num', 0)
                     )
                 else:
-                    logger.warning("[Bridge] Bridge setup skipped — traffic will be captured passively on eth0")
+                    logger.warning("[Bridge] Bridge setup skipped — traffic will be captured passively")
             except Exception as e:
-                logger.warning(f"[Bridge] Bridge setup failed ({e}) — falling back to passive capture on eth0")
+                logger.warning(f"[Bridge] Bridge setup failed ({e}) — falling back to passive capture")
         else:
             logger.warning("[Bridge] No bridge manager — packet processing only")
 
@@ -826,8 +828,8 @@ class LIDRAv3:
         """Detect honeypot and honeyfile hits."""
         import os
 
-        honeypot_log = BASE / "logs" / "honeypot.log"
-        state_file = BASE / "state" / "honeypot_processed.txt"
+        honeypot_log = BASE / self.config.get('deception', {}).get('honeypot_log', 'logs/honeypot.log')
+        state_file = BASE / self.config.get('deception', {}).get('state_file', 'state/honeypot_processed.txt')
 
         processed_ips = set()
         if state_file.exists():

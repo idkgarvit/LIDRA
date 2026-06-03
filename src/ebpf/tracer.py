@@ -56,18 +56,10 @@ class EBPFTracer:
         6: "network"
     }
     
-    SUSPICIOUS_PORTS = {
-        4444: "Metasploit",
-        5555: "ADB",
-        31337: "Back Orifice",
-        1337: "Common C2",
-        6667: "IRC C2",
-    }
-    
-    SUSPICIOUS_PATHS = [
+    SUSPICIOUS_PATHS = _get_config_list("suspicious_paths", [
         "/tmp/", "/var/tmp/", "/dev/shm/",
         "/proc/self/", "/.ssh/", "/.aws/",
-    ]
+    ])
     
     def __init__(self, config: dict = None):
         self.config = config or {}
@@ -317,25 +309,38 @@ class EBPFTracer:
         }
 
 
+import yaml
+
+
+def _get_config_list(key, default):
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get(key, default)
+    except Exception:
+        return default
+
+
 class EBPFDetector:
     """
     High-level detector that uses eBPF events.
     Maps raw events to attack types.
     """
-    
-    SUSPICIOUS_COMMANDS = [
+
+    SUSPICIOUS_COMMANDS = _get_config_list("suspicious_commands", [
         'wget', 'curl', 'nc', 'ncat', 'netcat',
         'python', 'python3', 'perl', 'ruby',
         'bash', 'sh', 'zsh',
         'nohup', 'setsid', 'disown',
         'chmod', 'chown', 'chattr',
-    ]
-    
-    SUSPICIOUS_EXTENSIONS = [
+    ])
+
+    SUSPICIOUS_EXTENSIONS = _get_config_list("suspicious_extensions", [
         '.php', '.phtml', '.phar', '.php5', '.php7',
         '.jsp', '.jspx', '.asp', '.aspx', '.exe',
         '.sh', '.bat', '.cmd', '.ps1',
-    ]
+    ])
     
     def __init__(self):
         pass
@@ -429,7 +434,7 @@ class EBPFDetector:
         """Analyze network connections."""
         
         # Known malicious ports
-        if event.dst_port in self.SUSPICIOUS_PORTS:
+        if event.dst_port in {4444, 5555, 31337, 1337, 6667}:
             return {
                 'attack_type': 'suspicious_connection',
                 'severity': 'high',
@@ -437,7 +442,6 @@ class EBPFDetector:
                 'details': {
                     'dst_ip': event.dst_ip,
                     'dst_port': event.dst_port,
-                    'malware_associated': self.SUSPICIOUS_PORTS.get(event.dst_port)
                 }
             }
         

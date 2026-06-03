@@ -11,7 +11,7 @@ class ConfigScreen(Screen):
         yield Header()
         yield Static("Configuration & Status", id="config-title")
         with Vertical(id="config-body"):
-            yield Static("Bridge Interfaces: eth0 <-> eth1", classes="config-item", id="cfg-interfaces")
+            yield Static("Bridge Interfaces: configured in config.yaml", classes="config-item", id="cfg-interfaces")
             yield Static("Detection Mode: INLINE", classes="config-item", id="cfg-mode")
             yield Static("Bridge Status: checking...", classes="config-item", id="cfg-bridge")
             yield Static("Active Blocks: 0", classes="config-item", id="cfg-blocks")

@@ -1,5 +1,17 @@
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional
+import yaml
+
+
+def _get_threshold(key, default):
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        return int(cfg.get("thresholds", {}).get(key, default))
+    except Exception:
+        return default
 
 
 class Verdict(Enum):
@@ -20,9 +32,9 @@ def decide_verdict(detections: List[Dict], ip_reputation: Optional[Dict] = None,
 
     if ip_reputation:
         score = ip_reputation.get("threat_score", 0)
-        if score >= 70:
+        if score >= _get_threshold("threat_score_drop", 70):
             return Verdict.DROP
-        if score >= 40:
+        if score >= _get_threshold("threat_score_log", 40):
             return Verdict.LOG_ONLY
 
     if rate_info:

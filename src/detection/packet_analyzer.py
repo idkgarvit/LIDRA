@@ -2,9 +2,21 @@ import logging
 import time
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Set
+import yaml
 
 logger = logging.getLogger(__name__)
+
+
+def _get_threshold(key, default):
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("thresholds", {}).get(key, default)
+    except Exception:
+        return default
 
 
 class PacketAnalyzer:
@@ -67,7 +79,7 @@ class PacketAnalyzer:
             self._syn_window[ip] = now
 
         self._syn_tracker[ip] += 1
-        if self._syn_tracker[ip] > 100:
+        if self._syn_tracker[ip] > _get_threshold("syn_flood", 100):
             return {
                 "attack_type": "syn_flood",
                 "severity": "high",
@@ -84,7 +96,7 @@ class PacketAnalyzer:
             self._port_scan_time[ip] = now
 
         self._port_scan_tracker[ip].add(port)
-        if len(self._port_scan_tracker[ip]) >= 20:
+        if len(self._port_scan_tracker[ip]) >= _get_threshold("port_scan", 20):
             return {
                 "attack_type": "port_scan",
                 "severity": "medium",

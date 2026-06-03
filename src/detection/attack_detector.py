@@ -12,6 +12,16 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+def _get_brute_force_threshold():
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("thresholds", {}).get("brute_force", 5)
+    except Exception:
+        return 5
+
+
 @dataclass
 class AttackConfig:
     """Configuration for attack detection thresholds."""
@@ -339,7 +349,7 @@ class AttackDetector:
         """Detect database brute force attacks."""
         self.db_attempts[ip].append(now)
 
-        if len(self.db_attempts[ip]) >= 5:
+        if len(self.db_attempts[ip]) >= _get_brute_force_threshold():
             self.db_attempts[ip] = []
             return self._create_attack(
                 f'{db_type}_bruteforce', ip, event,
@@ -355,7 +365,7 @@ class AttackDetector:
         """Detect email service brute force attacks."""
         self.email_attempts[ip].append(now)
 
-        if len(self.email_attempts[ip]) >= 5:
+        if len(self.email_attempts[ip]) >= _get_brute_force_threshold():
             self.email_attempts[ip] = []
             return self._create_attack(
                 f'{protocol}_bruteforce', ip, event,
@@ -371,7 +381,7 @@ class AttackDetector:
         """Detect FTP brute force attacks."""
         self.ftp_attempts[ip].append(now)
 
-        if len(self.ftp_attempts[ip]) >= 5:
+        if len(self.ftp_attempts[ip]) >= _get_brute_force_threshold():
             self.ftp_attempts[ip] = []
             return self._create_attack(
                 'ftp_bruteforce', ip, event,

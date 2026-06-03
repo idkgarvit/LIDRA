@@ -6,6 +6,8 @@ import socket
 import subprocess
 import fcntl
 import os
+import sys
+from pathlib import Path
 from typing import Dict, List, Optional, Callable
 
 logger = logging.getLogger(__name__)
@@ -64,11 +66,7 @@ class InlineEngine:
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._queue_num = (
-            config.get("local", {}).get("nfqueue_num") or
-            config.get("bridge", {}).get("nfqueue_num") or
-            0
-        )
+        self._queue_num = config.get("local", {}).get("nfqueue_num") or config.get("bridge", {}).get("nfqueue_num") or 0
 
         inline_cfg = config.get("inline", {})
         rate_cfg = inline_cfg.get("rate_limiting", {})
@@ -186,50 +184,16 @@ class InlineEngine:
                 self._blocklist.cleanup_expired()
                 last_cleanup = now
 
-    @staticmethod
-    def _detect_interface():
-        """Auto-detect interface with the default route (where internet comes from)."""
+    def _detect_interface(self) -> str:
+        """Detect active interface config-first, then auto-detect."""
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from utils.interface import detect_interface
+        preferred = self._config.get("local", {}).get("interface") or self._config.get("collectors", {}).get("network", {}).get("interface") or self._config.get("bridge", {}).get("interfaces", {}).get("wan")
         try:
-            with open("/proc/net/route") as f:
-                for line in f.readlines()[1:]:
-                    parts = line.strip().split()
-                    if len(parts) >= 8 and parts[1] == "00000000":
-                        return parts[0]
-        except Exception:
-            pass
-        try:
-            import netifaces
-            gateways = netifaces.gateways()
-            if "default" in gateways and netifaces.AF_INET in gateways["default"]:
-                return gateways["default"][netifaces.AF_INET][1]
-            interfaces = [i for i in netifaces.interfaces()
-                          if i != "lo" and not i.startswith(("docker", "br-", "veth"))]
-            if interfaces:
-                return interfaces[0]
-        except ImportError:
-            pass
-        try:
-            import psutil
-            stats = psutil.net_if_stats()
-            for name, stat in stats.items():
-                if name != "lo" and stat.isup and not name.startswith(("docker", "br-", "veth")):
-                    return name
-        except ImportError:
-            pass
-        try:
-            import fcntl
-            import struct as s
-            sck = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            buf = s.pack("256s", b"eth0")
-            try:
-                fcntl.ioctl(sck, 0x8927, buf)
-                return "eth0"
-            except OSError:
-                pass
-            sck.close()
-        except Exception:
-            pass
-        return "eth0"
+            return detect_interface(preferred)
+        except RuntimeError as e:
+            logger.error(f"[InlineEngine] {e}")
+            raise
 
     def _get_interface(self):
         return (
@@ -832,20 +796,20 @@ class InlineEngine:
         interface = self._get_interface()
         queue_num = self._queue_num
         try:
-            subprocess.run(["nft", "add", "table", "inet", "lidra_nfqueue"],
+            subprocess.run(["nft", "add", "table", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
                            capture_output=True, timeout=5)
-            subprocess.run(["nft", "add", "chain", "inet", "lidra_nfqueue", "input",
+            subprocess.run(["nft", "add", "chain", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), "input",
                            "{", "type", "filter", "hook", "input", "priority", "0;",
                            "policy", "accept;", "}"],
                            capture_output=True, timeout=5)
-            subprocess.run(["nft", "flush", "chain", "inet", "lidra_nfqueue", "input"],
+            subprocess.run(["nft", "flush", "chain", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), "input"],
                            capture_output=True, timeout=5)
-            cmd = ["nft", "add", "rule", "inet", "lidra_nfqueue", "input",
+            cmd = ["nft", "add", "rule", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), "input",
                    "meta", "iifname", interface,
                    "queue", "num", str(queue_num)]
             result = subprocess.run(cmd, capture_output=True, timeout=5)
             if result.returncode != 0:
-                cmd = ["nft", "add", "rule", "inet", "lidra_nfqueue", "input",
+                cmd = ["nft", "add", "rule", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), "input",
                        "queue", "num", str(queue_num)]
                 result = subprocess.run(cmd, capture_output=True, timeout=5)
                 if result.returncode != 0:
@@ -861,7 +825,7 @@ class InlineEngine:
 
     def _teardown_nfqueue_nft(self):
         try:
-            subprocess.run(["nft", "delete", "table", "inet", "lidra_nfqueue"],
+            subprocess.run(["nft", "delete", "table", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
                            capture_output=True, timeout=5)
         except Exception:
             pass

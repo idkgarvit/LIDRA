@@ -167,9 +167,31 @@ class DPIEngine:
         return {"sni": sni} if sni else None
 
     def _is_suspicious_sni(self, sni: str) -> bool:
-        suspicious = [".xyz", ".tk", ".ml", ".ga", ".cf", " malware", "phish", "c2", "botnet",
-                      "reverse", "shell", "ransom", "crypt", "exploit"]
+        suspicious = _get_suspicious_sni_patterns()
         return any(s in sni.lower() for s in suspicious)
+
+
+_SUSPICIOUS_SNI_PATTERNS = None
+
+
+def _get_suspicious_sni_patterns():
+    global _SUSPICIOUS_SNI_PATTERNS
+    if _SUSPICIOUS_SNI_PATTERNS is not None:
+        return _SUSPICIOUS_SNI_PATTERNS
+    import yaml
+    from pathlib import Path
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    default = [".xyz", ".tk", ".ml", ".ga", ".cf", "malware", "phish", "c2", "botnet",
+               "reverse", "shell", "ransom", "crypt", "exploit"]
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        patterns = cfg.get("suspicious_sni_patterns", [])
+        if patterns:
+            _SUSPICIOUS_SNI_PATTERNS = patterns
+    if _SUSPICIOUS_SNI_PATTERNS is None:
+        _SUSPICIOUS_SNI_PATTERNS = default
+    return _SUSPICIOUS_SNI_PATTERNS
 
     def _check_web_attack(self, parsed: Dict) -> Optional[DPIResult]:
         uri = parsed.get("uri", "")
@@ -225,6 +247,28 @@ class DPIEngine:
         if "scanner_signature" in patterns:
             return bool(patterns["scanner_signature"].search(ua) or
                         patterns["scanner_signature"].search(uri))
-        scanner_agents = ["nikto", "nmap", "sqlmap", "dirbuster", "gobuster",
-                          "wpscan", "nuclei", "masscan", "zgrab", "burp", "acunetix"]
+        scanner_agents = _get_scanner_agents()
         return any(s in ua.lower() for s in scanner_agents)
+
+
+_SCANNER_AGENTS = None
+
+
+def _get_scanner_agents():
+    global _SCANNER_AGENTS
+    if _SCANNER_AGENTS is not None:
+        return _SCANNER_AGENTS
+    import yaml
+    from pathlib import Path
+    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    default = ["nikto", "nmap", "sqlmap", "dirbuster", "gobuster",
+               "wpscan", "nuclei", "masscan", "zgrab", "burp", "acunetix"]
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        agents = cfg.get("scanner_agents", [])
+        if agents:
+            _SCANNER_AGENTS = agents
+    if _SCANNER_AGENTS is None:
+        _SCANNER_AGENTS = default
+    return _SCANNER_AGENTS
