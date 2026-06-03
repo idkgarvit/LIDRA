@@ -72,6 +72,8 @@ http_ports:
   - 8000
   - 8443
   - 3000
+  - 9090
+  - 5000
   - 5000
 
 # Suspicious ports (was hardcoded in packet_sniffer.py)
@@ -247,8 +249,12 @@ threat_intel:
 # IP Whitelist (never block these)
 whitelist:
   - 127.0.0.1
-  - 192.168.1.7
+  - 192.168.1.9
+
+# IPs to detect but NEVER block (test partners, trusted peers)
+no_block:
   - 192.168.1.8
+  - 192.168.1.10
 
 # Network Collectors
 collectors:

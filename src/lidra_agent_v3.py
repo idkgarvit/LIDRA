@@ -324,18 +324,22 @@ class LIDRAv3:
             self.db.record_attack(attacker_id, attack_type, source_log='network', raw_line=detection.get('details', ''))
 
             if severity in ('high', 'critical'):
-                alert = Alert(
-                    alert_type=attack_type,
-                    severity=severity,
-                    ip_address=source_ip,
-                    message=detection.get('details', attack_type)
-                )
-                self.notifier.notify(alert)
-                self.db.add_alert(attack_type, severity, source_ip, detection.get('details', '')[:500])
+                no_block = self.config.get("no_block", [])
+                if source_ip in no_block:
+                    logger.debug(f"[NOBLOCK] {source_ip} — detected but not blocked")
+                else:
+                    alert = Alert(
+                        alert_type=attack_type,
+                        severity=severity,
+                        ip_address=source_ip,
+                        message=detection.get('details', attack_type)
+                    )
+                    self.notifier.notify(alert)
+                    self.db.add_alert(attack_type, severity, source_ip, detection.get('details', '')[:500])
 
-                if not self.config.get('response', {}).get('dry_run', True):
-                    self.firewall.block_ip(source_ip, f"network_{attack_type}")
-                    logger.info(f"[BLOCKED] {source_ip} via network detection")
+                    if not self.config.get('response', {}).get('dry_run', True):
+                        self.firewall.block_ip(source_ip, f"network_{attack_type}")
+                        logger.info(f"[BLOCKED] {source_ip} via network detection")
 
         except Exception as e:
             logger.error(f"Network detection processing error: {e}")
@@ -411,26 +415,30 @@ class LIDRAv3:
             )
 
             if severity in ("high", "critical") and verdict == "drop":
-                alert = Alert(
-                    alert_type=attack_type,
-                    severity=severity,
-                    ip_address=source_ip,
-                    message=f"[INLINE] {details} — {verdict}"
-                )
-                self.notifier.notify(alert)
-                self.db.add_alert(attack_type, severity, source_ip, details[:500])
+                no_block = self.config.get("no_block", [])
+                if source_ip in no_block:
+                    logger.debug(f"[NOBLOCK] {source_ip} — detected but not blocked")
+                else:
+                    alert = Alert(
+                        alert_type=attack_type,
+                        severity=severity,
+                        ip_address=source_ip,
+                        message=f"[INLINE] {details} — {verdict}"
+                    )
+                    self.notifier.notify(alert)
+                    self.db.add_alert(attack_type, severity, source_ip, details[:500])
 
-                if not self.config.get('response', {}).get('dry_run', True):
-                    self.firewall.bridge_block_ip(source_ip)
-                    logger.info(f"[INLINE] Dropped & blocked {source_ip} — {attack_type}")
-                    self._push_tui_event({
-                            "type": "block",
-                            "data": {
-                                "ip": source_ip,
-                                "reason": f"Inline detection: {attack_type}",
-                                "timestamp": datetime.now().isoformat(),
-                            }
-                        })
+                    if not self.config.get('response', {}).get('dry_run', True):
+                        self.firewall.bridge_block_ip(source_ip)
+                        logger.info(f"[INLINE] Dropped & blocked {source_ip} — {attack_type}")
+                        self._push_tui_event({
+                                "type": "block",
+                                "data": {
+                                    "ip": source_ip,
+                                    "reason": f"Inline detection: {attack_type}",
+                                    "timestamp": datetime.now().isoformat(),
+                                }
+                            })
 
             logger.info(f"[INLINE] {attack_type} | {source_ip} | {severity} | verdict={verdict}")
 
@@ -733,10 +741,8 @@ class LIDRAv3:
 
     def _run_local_mode(self):
         logger.info("=" * 60)
+        logger.info("[LOCAL] AF_PACKET + iptables DROP — NFQUEUE skipped (breaks WiFi on Kali)")
 
-        # In local mode, use AF_PACKET + iptables DROP rules.
-        # NFQUEUE + nftables breaks WiFi on Kali — skip entirely.
-        # The inline engine's _run_loop already skips NFQUEUE in local mode.
         if self.inline_engine:
             self.inline_engine.start()
             logger.info("[InlineEngine] Packet processing started")
@@ -782,7 +788,8 @@ class LIDRAv3:
         cleanup_interval = 300
         last_cleanup = time.time()
 
-        logger.info(f"[LOCAL] Inline detection ACTIVE — monitoring INPUT via NFQUEUE {queue_num}")
+        iface = self.inline_engine._get_interface() if self.inline_engine else "unknown"
+        logger.info(f"[LOCAL] Inline detection ACTIVE — AF_PACKET on {iface}")
         logger.info(f"[LOCAL] Press Ctrl+C to stop")
 
         try:

@@ -412,7 +412,7 @@ class InlineEngine:
         flow_key = f"{src_ip}:{src_port}-{dst_ip}:{dst_port}-{protocol}"
 
         whitelist = self._config.get("whitelist", [])
-        if src_ip in whitelist or dst_ip in whitelist:
+        if src_ip in whitelist:
             self._flow_cache.track_packet(flow_key, has_payload)
             return detections
 
