@@ -157,14 +157,17 @@ class InlineEngine:
         logger.info("[InlineEngine] Stopped")
 
     def _run_loop(self):
-        # Attempt 1: NFQUEUE — true inline verdicts (DROP before delivery).
-        # Works on most distros (Mint, Ubuntu, Debian). Fails gracefully on
-        # Kali where nf_tables compat breaks nfnetlink_queue for WiFi.
-        try:
-            self._run_nfqueue_capture()
-            return
-        except Exception as e:
-            logger.warning(f"[InlineEngine] NFQUEUE unavailable ({e}); trying AF_PACKET")
+        mode = self._config.get("mode", "local")
+        # NFQUEUE requires nftables INPUT rules that break WiFi on Kali.
+        # Only use NFQUEUE in bridge/gateway mode (separate-box deployment).
+        # In local mode, skip straight to AF_PACKET.
+        if mode != "local":
+            # Attempt 1: NFQUEUE — true inline verdicts (DROP before delivery).
+            try:
+                self._run_nfqueue_capture()
+                return
+            except Exception as e:
+                logger.warning(f"[InlineEngine] NFQUEUE unavailable ({e}); trying AF_PACKET")
 
         # Attempt 2: AF_PACKET raw socket — works on ALL Linux distros.
         # No kernel modules, no WiFi breakage. Detection works, blocking
