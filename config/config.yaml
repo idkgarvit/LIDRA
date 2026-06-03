@@ -92,6 +92,8 @@ thresholds:
   threat_score_log: 40
   seq_covert_chars: 8
   ack_covert_chars: 6
+  ttl_covert_window: 15
+  ttl_covert_variations: 6
 
 # Timeouts (was hardcoded in multiple files)
 timeouts:

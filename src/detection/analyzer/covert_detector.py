@@ -1,7 +1,5 @@
 import logging
 import time
-import yaml
-from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Optional
 
@@ -9,22 +7,16 @@ logger = logging.getLogger(__name__)
 
 
 class CovertDetector:
-    def __init__(self):
+    def __init__(self, config: dict = None):
         self._seq_anomalies: Dict[str, List[int]] = defaultdict(list)
         self._ttl_anomalies: Dict[str, List[int]] = defaultdict(list)
         self._ack_anomalies: Dict[str, List[int]] = defaultdict(list)
         self._last_cleanup = time.time()
-        self._seq_threshold = self._load_threshold("seq_covert_chars", 8)
-        self._ack_threshold = self._load_threshold("ack_covert_chars", 6)
-
-    def _load_threshold(self, key, default):
-        cfg_path = Path(__file__).parent.parent.parent.parent / "config" / "config.yaml"
-        try:
-            with open(cfg_path) as f:
-                cfg = yaml.safe_load(f)
-            return cfg.get("thresholds", {}).get(key, default)
-        except Exception:
-            return default
+        thresholds = (config or {}).get("thresholds", {}) if config else {}
+        self._seq_threshold = thresholds.get("seq_covert_chars", 8)
+        self._ack_threshold = thresholds.get("ack_covert_chars", 6)
+        self._ttl_window = thresholds.get("ttl_covert_window", 15)
+        self._ttl_variations = thresholds.get("ttl_covert_variations", 6)
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
@@ -96,8 +88,8 @@ class CovertDetector:
 
     def _check_ttl_covert(self, ip, ttl):
         self._ttl_anomalies[ip].append(ttl)
-        recent = self._ttl_anomalies[ip][-15:]
-        if len(recent) >= 10 and len(set(recent)) >= 6:
+        recent = self._ttl_anomalies[ip][-self._ttl_window:]
+        if len(recent) >= self._ttl_window and len(set(recent)) >= self._ttl_variations:
             return {"attack_type": "ttl_covert_channel", "severity": "medium", "source_ip": ip,
                     "details": f"TTL manipulation: values {set(recent)} over {len(recent)} pkts"}
         return None

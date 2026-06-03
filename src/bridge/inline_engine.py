@@ -96,7 +96,7 @@ class InlineEngine:
         self._fragment_analyzer = FragmentAnalyzer()
         self._port_analyzer = PortAnalyzer()
         self._tunnel_detector = TunnelDetector()
-        self._covert_detector = CovertDetector()
+        self._covert_detector = CovertDetector(self._config)
         self._ipv6_analyzer = IPv6Analyzer()
         self._l2_analyzer = L2Analyzer()
         self._timing_analyzer = TimingAnalyzer()
