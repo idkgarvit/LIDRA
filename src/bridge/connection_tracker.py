@@ -39,6 +39,26 @@ def _connection_key(pkt: Dict) -> Tuple:
 
 _APP_PROTO_MAP = None
 
+_HTTP_METHODS = {b"GET", b"POST", b"PUT", b"DELETE", b"PATCH",
+                 b"HEAD", b"OPTIONS", b"CONNECT", b"TRACE"}
+
+
+def _detect_protocol_from_payload(payload: bytes) -> str:
+    if not payload:
+        return ""
+    first_word = payload.split(b" ")[0] if b" " in payload[:16] else payload[:16]
+    if first_word in _HTTP_METHODS or b"HTTP/" in payload[:64]:
+        return "http"
+    if payload[:4] == b"SSH-":
+        return "ssh"
+    if len(payload) > 5 and payload[0] == 0x16 and payload[5] in (0x01, 0x02):
+        return "tls"
+    if payload[:4] in (b"EHLO", b"HELO") or payload[:9] in (b"MAIL FROM", b"RCPT TO"):
+        return "smtp"
+    if payload[:4] in (b"USER", b"PASS") or payload[:5] == b"QUIT\r\n":
+        return "ftp"
+    return ""
+
 
 def _get_proto_map():
     global _APP_PROTO_MAP
@@ -104,6 +124,11 @@ class ConnectionTracker:
                 )
                 dst_port_key = dst_port if dst_port in _get_proto_map() else src_port
                 conn.app_protocol = _get_proto_map().get(dst_port_key, "")
+                payload = packet.get("payload", b"")
+                if payload:
+                    sniffed = _detect_protocol_from_payload(payload)
+                    if sniffed:
+                        conn.app_protocol = sniffed
                 self._connections[key] = conn
 
             conn.last_seen = now

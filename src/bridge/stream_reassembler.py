@@ -105,7 +105,13 @@ class StreamReassembler:
     def _extract_messages(self, buffer: bytearray, dst_port: int) -> List[bytes]:
         messages = []
         if dst_port not in _get_http_ports():
-            return messages
+            if len(buffer) < 4:
+                return messages
+            first = buffer[:16].split(b" ")[0]
+            if first not in (b"GET", b"POST", b"PUT", b"DELETE", b"PATCH",
+                             b"HEAD", b"OPTIONS", b"CONNECT", b"TRACE"):
+                if b"HTTP/" not in buffer[:64]:
+                    return messages
         while True:
                 header_end = buffer.find(b"\r\n\r\n")
                 if header_end == -1:

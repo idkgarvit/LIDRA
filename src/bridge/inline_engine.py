@@ -110,8 +110,21 @@ class InlineEngine:
         self._start_time = 0.0
         self._lock = threading.Lock()
 
+        from detection.analyzer.tcp_fingerprinter import TCPFingerprinter
+        from detection.analyzer.behavioral_analyzer import BehavioralAnalyzer
+        from detection.analyzer.session_correlator import SessionCorrelator
+        from utils.bloom import BloomFilter, FlowCache
+        self._tcp_fingerprinter = TCPFingerprinter()
+        self._behavioral_analyzer = BehavioralAnalyzer()
+        self._session_correlator = SessionCorrelator()
+        self._bloom_filter = BloomFilter(capacity=50000, error_rate=0.001)
+        self._flow_cache = FlowCache(capacity=5000, clean_threshold=15)
+
         self._on_detection_callback: Optional[Callable] = None
         self._pipeline_order = ["blocklist", "header_analysis", "stream_reassembly", "dpi", "verdict"]
+        self._criteria_packets = 0
+        self._high_priority = 0
+        self._low_priority = 0
 
     @property
     def blocklist(self) -> Blocklist:
@@ -196,11 +209,25 @@ class InlineEngine:
             raise
 
     def _get_interface(self):
-        return (
+        cfg_iface = (
             self._config.get("local", {}).get("interface") or
             self._config.get("bridge", {}).get("interfaces", {}).get("wan") or
             self._detect_interface()
         )
+        bridge_iface = self._config.get("bridge", {}).get("interfaces", {}).get("bridge")
+        if not bridge_iface:
+            brport = Path(f"/sys/class/net/{cfg_iface}/brport/bridge")
+            if brport.exists():
+                try:
+                    bridge_iface = brport.resolve().name
+                except Exception:
+                    pass
+        if bridge_iface:
+            if Path(f"/sys/class/net/{bridge_iface}").exists():
+                logger.info(f"[InlineEngine] Using bridge interface {bridge_iface}")
+                return bridge_iface
+            logger.debug(f"[InlineEngine] Bridge {bridge_iface} not found, using {cfg_iface}")
+        return cfg_iface
 
     def _run_tcpdump_capture(self):
         interface = self._get_interface()
@@ -372,6 +399,27 @@ class InlineEngine:
     def _run_detection_pipeline(self, packet: Dict) -> List[Dict]:
         detections = []
         src_ip = packet.get("src_ip", "")
+        dst_ip = packet.get("dst_ip", "")
+        src_port = packet.get("src_port", 0)
+        dst_port = packet.get("dst_port", 0)
+        protocol = packet.get("protocol", "")
+        flags = packet.get("flags", "")
+        has_payload = bool(packet.get("payload"))
+
+        flow_key = f"{src_ip}:{src_port}-{dst_ip}:{dst_port}-{protocol}"
+
+        whitelist = self._config.get("whitelist", [])
+        if src_ip in whitelist or dst_ip in whitelist:
+            self._flow_cache.track_packet(flow_key, has_payload)
+            return detections
+
+        if self._bloom_filter.contains(src_ip):
+            detections.append({
+                "attack_type": "blocked_ip_traffic",
+                "severity": "high",
+                "source_ip": src_ip,
+                "details": "IP on bloom blocklist",
+            })
 
         if self._blocklist.is_blocked(src_ip):
             detections.append({
@@ -381,18 +429,26 @@ class InlineEngine:
                 "details": "IP on blocklist",
             })
 
+        if "S" in flags and "A" not in flags:
+            self._criteria_packets += 1
+
+        if has_payload and self._flow_cache.is_benign(flow_key):
+            self._low_priority += 1
+            return detections
+
         header_result = self._packet_analyzer.analyze_header(packet)
         if header_result:
             detections.append(header_result)
 
-        protocol = packet.get("protocol", "tcp")
+        run_dpi = False
         if protocol == "tcp":
             conn = self._connection_tracker.track(packet)
-            if packet.get("payload"):
-                direction = "client" if packet.get("src_port", 0) > 1024 else "server"
+            if has_payload:
+                direction = "client" if src_port > 1024 else "server"
                 messages = self._stream_reassembler.add_segment(packet, direction)
                 if messages and conn:
                     app_proto = conn.app_protocol if conn else ""
+                    run_dpi = True
                     for msg in messages:
                         dpi_result = self._dpi_engine.inspect_stream(msg, app_proto)
                         if dpi_result:
@@ -407,6 +463,7 @@ class InlineEngine:
         else:
             payload = packet.get("payload", b"")
             if payload:
+                run_dpi = True
                 dpi_result = self._dpi_engine.inspect_packet(payload, protocol)
                 if dpi_result:
                     detections.append({
@@ -422,13 +479,22 @@ class InlineEngine:
                          self._port_analyzer, self._tunnel_detector,
                          self._covert_detector, self._ipv6_analyzer,
                          self._l2_analyzer, self._timing_analyzer,
-                         self._proxy_detector):
+                         self._proxy_detector,
+                         self._tcp_fingerprinter,
+                         self._behavioral_analyzer,
+                         self._session_correlator):
             try:
                 result = analyzer.analyze(packet)
                 if result:
                     detections.extend(result)
             except Exception as e:
                 logger.debug(f"[{type(analyzer).__name__}] error: {e}")
+
+        if detections:
+            self._flow_cache.mark_suspicious(flow_key)
+        elif run_dpi and has_payload:
+            self._flow_cache.track_packet(flow_key, has_payload)
+            self._high_priority += 1
 
         return detections
 

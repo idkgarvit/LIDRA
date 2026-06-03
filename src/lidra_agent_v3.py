@@ -315,6 +315,11 @@ class LIDRAv3:
             if source_ip == 'unknown':
                 return
 
+            whitelist = self.config.get('whitelist', [])
+            if source_ip in whitelist:
+                logger.debug(f"[WL] Skipping detection from whitelisted IP {source_ip}")
+                return
+
             attacker_id = self.db.add_attacker(source_ip, "", "")
             self.db.record_attack(attacker_id, attack_type, source_log='network', raw_line=detection.get('details', ''))
 
@@ -382,6 +387,11 @@ class LIDRAv3:
             packet_info = data.get("packet", {})
 
             if not source_ip:
+                return
+
+            whitelist = self.config.get('whitelist', [])
+            if source_ip in whitelist:
+                logger.debug(f"[WL] Skipping detection from whitelisted IP {source_ip}")
                 return
 
             detected = self.detector.analyze_packet_event(detection)

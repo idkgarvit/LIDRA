@@ -66,6 +66,9 @@ class CovertDetector:
                     chars.append(chr(diff))
             if len(chars) >= self._seq_threshold:
                 data = "".join(chars[-self._seq_threshold:])
+                distinct = len(set(data))
+                if distinct > max(3, len(data) * 0.7):
+                    return None
                 return {"attack_type": "seq_covert_channel", "severity": "high", "source_ip": ip,
                         "details": f"Seq number encoding: '{data}'"}
         return None
@@ -84,6 +87,9 @@ class CovertDetector:
                     chars.append(chr(diff))
             if len(chars) >= self._ack_threshold:
                 data = "".join(chars[-self._ack_threshold:])
+                distinct = len(set(data))
+                if distinct > max(3, len(data) * 0.7):
+                    return None
                 return {"attack_type": "ack_covert_channel", "severity": "high", "source_ip": ip,
                         "details": f"ACK number encoding: '{data}'"}
         return None

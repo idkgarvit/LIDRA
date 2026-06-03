@@ -247,6 +247,8 @@ threat_intel:
 # IP Whitelist (never block these)
 whitelist:
   - 127.0.0.1
+  - 192.168.1.7
+  - 192.168.1.8
 
 # Network Collectors
 collectors:

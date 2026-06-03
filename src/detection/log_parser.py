@@ -123,7 +123,7 @@ class LogParser:
     WEB_ATTACK_PATTERNS = {
         # OWASP Top 10
         'sql_injection': re.compile(
-            r"(union\s+select|select\s+.*\s+from|insert\s+into|update\s+.*\s+set|delete\s+from|drop\s+table|;\s*--|'\s*or\s*'|'\s*and\s*'|1\s*=\s*1|0x[0-9a-f]+)",
+            r"(union[\s/*]+select|select[\s/*]+.*[\s/*]+from|insert\s+into|update\s+.*\s+set|delete\s+from|drop\s+table|;\s*--|'\s*or\s*'|\"\s*or\s*\"|'\s*and\s*'|1\s*=\s*1|0x[0-9a-f]+)",
             re.IGNORECASE
         ),
         'xss': re.compile(
@@ -131,7 +131,7 @@ class LogParser:
             re.IGNORECASE
         ),
         'path_traversal': re.compile(
-            r"(\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|\.\.%2f|%2e%2e%5c|%252e%252e%252f)",
+            r"(\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|\.\.%2f|%2e%2e%5c|%252e%252e%252f|%c0%ae%c0%ae|%252e%252e/)",
             re.IGNORECASE
         ),
         'lfi_attempt': re.compile(

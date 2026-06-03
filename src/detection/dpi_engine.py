@@ -1,10 +1,54 @@
 import logging
 import re
+import base64
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_utf7(m):
+    try:
+        raw = m.group(1)
+        raw = raw.replace(",", "")
+        padding = 4 - len(raw) % 4 if len(raw) % 4 else 0
+        raw += "=" * padding
+        decoded = base64.b64decode(raw).decode("utf-16-be", errors="replace")
+        return decoded
+    except Exception:
+        return m.group(0)
+
+
+def _looks_like_b64(s):
+    sane = s.strip()
+    if len(sane) < 8 or len(sane) % 4 != 0:
+        return False
+    content = sane.rstrip("=")
+    if not content:
+        return False
+    return _BASE64_RE.match(content) is not None
+
+
+def _has_printable_content(s):
+    if not s:
+        return False
+    printable = sum(1 for c in s if 32 <= ord(c) <= 126 or c in "\n\r\t")
+    return printable / len(s) > 0.8
+
+_BASE64_RE = re.compile(r'^[A-Za-z0-9+/]*={0,2}$')
+_HEX_ENTITY_RE = re.compile(r'&#x([0-9a-fA-F]+);')
+_DEC_ENTITY_RE = re.compile(r'&#(\d+);')
+_NAMED_ENTITIES = {
+    "&lt;": "<", "&gt;": ">", "&amp;": "&", "&quot;": '"',
+    "&apos;": "'", "&#x27;": "'", "&#x2F;": "/", "&#x3C;": "<",
+    "&#x3E;": ">", "&#60;": "<", "&#62;": ">", "&#34;": '"',
+    "&#39;": "'", "&#47;": "/",
+}
+_UTF7_B64_RE = re.compile(r'\+([A-Za-z0-9+/]+)-')
+_HEX_ESCAPE_RE = re.compile(r'\\x([0-9a-fA-F]{2})')
+_UNICODE_ESCAPE_RE = re.compile(r'\\u([0-9a-fA-F]{4})')
+_SQL_COMMENT_RE = re.compile(r'/\*.*?\*/', re.DOTALL)
 
 
 @dataclass
@@ -27,13 +71,19 @@ class DPIEngine:
     def inspect_stream(self, stream_data: bytes, protocol: str) -> Optional[DPIResult]:
         if not stream_data:
             return None
-        if protocol == "http":
+        first_four = stream_data[:4]
+        looks_http = first_four in (b"GET ", b"POST", b"PUT ", b"DEL ", b"PATC",
+                                    b"HEAD", b"OPTI", b"CONN", b"TRAC") or \
+                     b"HTTP/" in stream_data[:64]
+        logger.debug(f"[DPI] inspect_stream protocol={protocol} looks_http={looks_http} data_len={len(stream_data)}")
+        if protocol == "http" or looks_http:
             parsed = self._parse_http(stream_data)
+            logger.debug(f"[DPI] _parse_http result={'OK' if parsed else 'FAIL'}")
             if parsed:
                 result = self._check_web_attack(parsed)
                 if result:
                     return result
-        elif protocol == "dns":
+        if protocol == "dns":
             parsed = self._parse_dns(stream_data)
             if parsed:
                 return DPIResult(
@@ -43,7 +93,7 @@ class DPIEngine:
                     confidence=0.5,
                     mitre=["T1572"],
                 )
-        elif protocol == "tls":
+        if protocol == "tls":
             parsed = self._parse_tls(stream_data)
             if parsed:
                 sni = parsed.get("sni", "")
@@ -60,7 +110,7 @@ class DPIEngine:
     def inspect_packet(self, payload: bytes, protocol: str) -> Optional[DPIResult]:
         if not payload:
             return None
-        body = unquote(payload.decode("utf-8", errors="replace"))
+        body = self._decode(payload.decode("utf-8", errors="replace"))
         if self._detect_sqli(body):
             return DPIResult("sql_injection", "critical", f"SQLi detected: {body[:200]}", 0.9, ["T1190"])
         if self._detect_xss(body):
@@ -170,14 +220,50 @@ class DPIEngine:
         suspicious = _get_suspicious_sni_patterns()
         return any(s in sni.lower() for s in suspicious)
 
+    def _decode(self, text: str) -> str:
+        return self._deep_decode(text)
+
+    @staticmethod
+    def _deep_decode(text: str, max_depth: int = 10) -> str:
+        current = text
+        for _ in range(max_depth):
+            prev = current
+            current = unquote(current)
+            current = _UNICODE_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
+            current = _HEX_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
+            current = _HEX_ENTITY_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
+            current = _DEC_ENTITY_RE.sub(lambda m: chr(int(m.group(1))), current)
+            for name, char in _NAMED_ENTITIES.items():
+                current = current.replace(name, char)
+            current = _UTF7_B64_RE.sub(_decode_utf7, current)
+            current = _SQL_COMMENT_RE.sub('', current)
+            try:
+                b64_candidates = re.findall(r'[A-Za-z0-9+/]{8,}={0,2}', current)
+                for cand in b64_candidates:
+                    if _looks_like_b64(cand):
+                        decoded = base64.b64decode(cand).decode("utf-8", errors="replace")
+                        if _has_printable_content(decoded):
+                            current = current.replace(cand, decoded, 1)
+            except Exception:
+                pass
+            if current == prev:
+                break
+        return current
+
     def _check_web_attack(self, parsed: Dict) -> Optional[DPIResult]:
         uri = parsed.get("uri", "")
         body = parsed.get("body", "")
         ua = parsed.get("headers", {}).get("user-agent", "")
-        decoded_uri = unquote(uri)
-        decoded_body = unquote(body)
+        decoded_uri = self._decode(uri)
+        decoded_body = self._decode(body)
 
-        if self._detect_sqli(decoded_body) or self._detect_sqli(decoded_uri):
+        logger.debug(f"[DPI] _check_web_attack uri={uri} body_len={len(body)} decoded_uri={decoded_uri[:100]}")
+        sqli_check = self._detect_sqli(decoded_body) or self._detect_sqli(decoded_uri)
+        xss_check = self._detect_xss(decoded_body) or self._detect_xss(decoded_uri)
+        cmdi_check = self._detect_cmd_injection(decoded_body) or self._detect_cmd_injection(decoded_uri)
+        logger.debug(f"[DPI] checks: sqli={sqli_check} xss={xss_check} cmdi={cmdi_check}")
+
+        if sqli_check:
             return DPIResult("sql_injection", "critical", f"SQLi in {uri}", 0.9, ["T1190"])
         if self._detect_xss(decoded_body) or self._detect_xss(decoded_uri):
             return DPIResult("xss_attempt", "high", f"XSS in {uri}", 0.85, ["T1190"])
@@ -195,8 +281,8 @@ class DPIEngine:
         if "sql_injection" in patterns:
             return bool(patterns["sql_injection"].search(text))
         return bool(re.search(
-            r"(union\s+select|select\s+.*\s+from|insert\s+into|"
-            r"drop\s+table|;\s*--|'\s*or\s*'|1\s*=\s*1)",
+            r"(union[\s/*]+select|select[\s/*]+.*[\s/*]+from|insert\s+into|"
+            r"drop\s+table|;\s*--|'\s*or\s*'|\"\s*or\s*\"|1\s*=\s*1)",
             text, re.IGNORECASE))
 
     def _detect_xss(self, text: str) -> bool:
