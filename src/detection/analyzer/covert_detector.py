@@ -1,5 +1,7 @@
 import logging
 import time
+import yaml
+from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Optional
 
@@ -12,6 +14,17 @@ class CovertDetector:
         self._ttl_anomalies: Dict[str, List[int]] = defaultdict(list)
         self._ack_anomalies: Dict[str, List[int]] = defaultdict(list)
         self._last_cleanup = time.time()
+        self._seq_threshold = self._load_threshold("seq_covert_chars", 8)
+        self._ack_threshold = self._load_threshold("ack_covert_chars", 6)
+
+    def _load_threshold(self, key, default):
+        cfg_path = Path(__file__).parent.parent.parent.parent / "config" / "config.yaml"
+        try:
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f)
+            return cfg.get("thresholds", {}).get(key, default)
+        except Exception:
+            return default
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
@@ -48,17 +61,17 @@ class CovertDetector:
         return detections if detections else None
 
     def _check_seq_covert(self, ip, seq):
-        anomalies = []
         last_bytes = seq & 0xFF
         self._seq_anomalies[ip].append(last_bytes)
-        recent = self._seq_anomalies[ip][-20:]
-        if len(recent) >= 5:
+        recent = self._seq_anomalies[ip][-25:]
+        if len(recent) >= 10:
+            chars = []
             for i in range(len(recent) - 1):
                 diff = (recent[i + 1] - recent[i]) & 0xFF
-                if diff > 1 and chr(diff) in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789":
-                    anomalies.append(chr(diff))
-            if len(anomalies) >= 4:
-                data = "".join(anomalies[-8:])
+                if 32 <= diff <= 126:
+                    chars.append(chr(diff))
+            if len(chars) >= self._seq_threshold:
+                data = "".join(chars[-self._seq_threshold:])
                 return {"attack_type": "seq_covert_channel", "severity": "high", "source_ip": ip,
                         "details": f"Seq number encoding: '{data}'"}
         return None
@@ -68,21 +81,23 @@ class CovertDetector:
             return None
         last_bytes = ack & 0xFF
         self._ack_anomalies[ip].append(last_bytes)
-        recent = self._ack_anomalies[ip][-20:]
-        if len(recent) >= 5:
-            diffs = [(recent[i + 1] - recent[i]) & 0xFF for i in range(len(recent) - 1)]
-            non_zero = [d for d in diffs if d != 0]
-            if len(non_zero) >= 4:
-                chars = "".join(chr(d) for d in non_zero[-8:] if 32 <= d <= 126)
-                if len(chars) >= 3:
-                    return {"attack_type": "ack_covert_channel", "severity": "high", "source_ip": ip,
-                            "details": f"ACK number encoding: '{chars}'"}
+        recent = self._ack_anomalies[ip][-25:]
+        if len(recent) >= 10:
+            chars = []
+            for i in range(len(recent) - 1):
+                diff = (recent[i + 1] - recent[i]) & 0xFF
+                if 32 <= diff <= 126:
+                    chars.append(chr(diff))
+            if len(chars) >= self._ack_threshold:
+                data = "".join(chars[-self._ack_threshold:])
+                return {"attack_type": "ack_covert_channel", "severity": "high", "source_ip": ip,
+                        "details": f"ACK number encoding: '{data}'"}
         return None
 
     def _check_ttl_covert(self, ip, ttl):
         self._ttl_anomalies[ip].append(ttl)
-        recent = self._ttl_anomalies[ip][-10:]
-        if len(recent) >= 5 and len(set(recent)) >= 4:
+        recent = self._ttl_anomalies[ip][-15:]
+        if len(recent) >= 10 and len(set(recent)) >= 6:
             return {"attack_type": "ttl_covert_channel", "severity": "medium", "source_ip": ip,
                     "details": f"TTL manipulation: values {set(recent)} over {len(recent)} pkts"}
         return None
