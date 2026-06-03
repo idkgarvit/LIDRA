@@ -117,8 +117,13 @@ class InlineEngine:
         self._tcp_fingerprinter = TCPFingerprinter()
         self._behavioral_analyzer = BehavioralAnalyzer()
         self._session_correlator = SessionCorrelator()
-        self._bloom_filter = BloomFilter(capacity=50000, error_rate=0.001)
-        self._flow_cache = FlowCache(capacity=5000, clean_threshold=15)
+        bf_cfg = config.get("inline", {}).get("bloom", {})
+        self._bloom_filter = BloomFilter(capacity=bf_cfg.get("capacity", 50000), error_rate=bf_cfg.get("error_rate", 0.001))
+        fc_cfg = config.get("inline", {}).get("flow_cache", {})
+        self._flow_cache = FlowCache(
+            capacity=fc_cfg.get("capacity", 5000),
+            clean_threshold=fc_cfg.get("clean_threshold", 15)
+        )
 
         self._on_detection_callback: Optional[Callable] = None
         self._pipeline_order = ["blocklist", "header_analysis", "stream_reassembly", "dpi", "verdict"]
@@ -224,7 +229,33 @@ class InlineEngine:
                 try:
                     bridge_iface = brport.resolve().name
                 except Exception:
-                    pass
+                    logger.debug(f"[InlineEngine] Could not resolve bridge for {cfg_iface}")
+            if not bridge_iface:
+                try:
+                    import subprocess
+                    r = subprocess.run(["bridge", "link", "show", "dev", cfg_iface],
+                                       capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0 and "master" in r.stdout:
+                        parts = r.stdout.split()
+                        if "master" in parts:
+                            idx = parts.index("master")
+                            bridge_iface = parts[idx + 1]
+                            logger.debug(f"[InlineEngine] Detected bridge via `bridge link show`: {bridge_iface}")
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    logger.debug("[InlineEngine] `bridge link show` not available")
+            if not bridge_iface:
+                try:
+                    import subprocess
+                    r = subprocess.run(["brctl", "show"],
+                                       capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0:
+                        for line in r.stdout.splitlines()[1:]:
+                            if cfg_iface in line:
+                                bridge_iface = line.split()[0]
+                                logger.debug(f"[InlineEngine] Detected bridge via `brctl show`: {bridge_iface}")
+                                break
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    logger.debug("[InlineEngine] `brctl show` not available")
         if bridge_iface:
             if Path(f"/sys/class/net/{bridge_iface}").exists():
                 logger.info(f"[InlineEngine] Using bridge interface {bridge_iface}")
@@ -352,17 +383,23 @@ class InlineEngine:
                         last_stats = now
                 continue
 
-            packet = self._parse_packet(data)
-            if not packet:
+            try:
+                packet = self._parse_packet(data)
+                if not packet:
+                    continue
+
+                with self._lock:
+                    self._packet_count += 1
+                    pkt_batch_count += 1
+
+                detections = self._run_detection_pipeline(packet)
+                if not detections or not isinstance(detections, list):
+                    detections = []
+                verdict = decide_verdict(detections)
+                self._apply_verdict(0, verdict, packet, detections, time.time())
+            except Exception as e:
+                logger.warning(f"[InlineEngine] Packet processing error: {e}")
                 continue
-
-            with self._lock:
-                self._packet_count += 1
-                pkt_batch_count += 1
-
-            detections = self._run_detection_pipeline(packet)
-            verdict = decide_verdict(detections)
-            self._apply_verdict(0, verdict, packet, detections, time.time())
 
             now = time.time()
             if now - last_cleanup > cleanup_interval:
@@ -699,7 +736,7 @@ class InlineEngine:
                 self._nfq_send_config(sock, NFQNL_CFG_CMD_UNBIND, socket.AF_INET, queue_num,
                                       "UNBIND", request_ack=False)
             except Exception:
-                pass
+                logger.debug("[InlineEngine] Stale NFQUEUE unbind skipped (expected)")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET, 0, "PF_BIND AF_INET")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET6, 0, "PF_BIND AF_INET6")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_BIND, socket.AF_INET, queue_num, "BIND")
@@ -897,7 +934,7 @@ class InlineEngine:
             subprocess.run(["nft", "delete", "table", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
                            capture_output=True, timeout=5)
         except Exception:
-            pass
+            logger.debug("[InlineEngine] NFQUEUE teardown skipped (not active)")
 
     def get_stats(self) -> Dict:
         with self._lock:

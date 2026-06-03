@@ -3,7 +3,11 @@ import re
 import base64
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-from urllib.parse import unquote
+from urllib.parse import unquote, parse_qs
+
+from detection.fingerprint.tls_fingerprinter import TLSFingerprinter
+from detection.anomaly.smuggling_detector import SmugglingDetector
+from detection.detector.dns_tunnel_detector import DNSTunnelDetector
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,9 @@ class DPIEngine:
         self._attack_patterns = {}
         if log_parser and hasattr(log_parser, "WEB_ATTACK_PATTERNS"):
             self._attack_patterns = log_parser.WEB_ATTACK_PATTERNS
+        self._tls_fingerprinter = TLSFingerprinter()
+        self._smuggling_detector = SmugglingDetector()
+        self._dns_tunnel = DNSTunnelDetector()
 
     def inspect_stream(self, stream_data: bytes, protocol: str) -> Optional[DPIResult]:
         if not stream_data:
@@ -86,13 +93,29 @@ class DPIEngine:
         if protocol == "dns":
             parsed = self._parse_dns(stream_data)
             if parsed:
-                return DPIResult(
+                dns_result = DPIResult(
                     attack_type="dns_anomaly",
                     severity="low",
                     details=f"DNS query: {parsed.get('query', 'unknown')}",
                     confidence=0.5,
                     mitre=["T1572"],
                 )
+                return dns_result
+            dns_tunnel_result = self._dns_tunnel.analyze({
+                "protocol": "dns",
+                "payload": stream_data,
+                "src_ip": "",
+                "dst_port": 53,
+            })
+            if dns_tunnel_result:
+                for r in dns_tunnel_result:
+                    return DPIResult(
+                        attack_type=r["attack_type"],
+                        severity=r["severity"],
+                        details=r["details"],
+                        confidence=r.get("confidence", 0.5),
+                        mitre=r.get("mitre", ["T1572"]),
+                    )
         if protocol == "tls":
             parsed = self._parse_tls(stream_data)
             if parsed:
@@ -105,6 +128,23 @@ class DPIEngine:
                         confidence=0.6,
                         mitre=["T1572"],
                     )
+            fp = self._tls_fingerprinter.analyze(stream_data)
+            if fp and fp.get("attack_type") == "malicious_tls_fingerprint":
+                return DPIResult(
+                    attack_type=fp["attack_type"],
+                    severity=fp["severity"],
+                    details=fp["details"],
+                    confidence=fp["confidence"],
+                    mitre=["T1572"],
+                )
+        if b"SSH-" in stream_data[:64]:
+            return DPIResult(
+                attack_type="ssh_detected",
+                severity="low",
+                details="SSH connection on non-standard port",
+                confidence=0.5,
+                mitre=["T1021"],
+            )
         return None
 
     def inspect_packet(self, payload: bytes, protocol: str) -> Optional[DPIResult]:
@@ -175,7 +215,7 @@ class DPIEngine:
                 if qname_parts:
                     return {"query": ".".join(qname_parts)}
         except Exception:
-            pass
+            logger.debug("[DPI] DNS parse failed")
         return None
 
     def _parse_tls(self, data: bytes) -> Optional[Dict]:
@@ -221,7 +261,66 @@ class DPIEngine:
         return any(s in sni.lower() for s in suspicious)
 
     def _decode(self, text: str) -> str:
-        return self._deep_decode(text)
+        decoded, encodings = self._deep_decode_with_tracking(text)
+        if len(encodings) >= 3:
+            logger.warning(f"[DPI] Mixed encoding ({len(encodings)} types: {encodings}) in payload: {text[:80]}")
+        return decoded
+
+    @staticmethod
+    def _deep_decode_with_tracking(text: str, max_depth: int = 10):
+        current = text
+        encodings = set()
+        for _ in range(max_depth):
+            iteration_start = current
+            prev = current
+            current = unquote(current)
+            if current != prev:
+                encodings.add("url")
+            prev = current
+            current = _UNICODE_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
+            if current != prev:
+                encodings.add("unicode")
+            prev = current
+            current = _HEX_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
+            if current != prev:
+                encodings.add("hex_escape")
+            prev = current
+            current = _HEX_ENTITY_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
+            if current != prev:
+                encodings.add("hex_entity")
+            prev = current
+            current = _DEC_ENTITY_RE.sub(lambda m: chr(int(m.group(1))), current)
+            if current != prev:
+                encodings.add("dec_entity")
+            prev = current
+            for name, char in _NAMED_ENTITIES.items():
+                current = current.replace(name, char)
+            if current != prev:
+                encodings.add("named_entity")
+            prev = current
+            current = _UTF7_B64_RE.sub(_decode_utf7, current)
+            if current != prev:
+                encodings.add("utf7")
+            prev = current
+            current = _SQL_COMMENT_RE.sub('', current)
+            if current != prev:
+                encodings.add("sql_comment")
+            prev = current
+            try:
+                b64_candidates = re.findall(r'[A-Za-z0-9+/]{8,}={0,2}', current)
+                for cand in b64_candidates:
+                    if _looks_like_b64(cand):
+                        decoded = base64.b64decode(cand).decode("utf-8", errors="replace")
+                        if _has_printable_content(decoded):
+                            current = current.replace(cand, decoded, 1)
+                            encodings.add("base64")
+            except Exception:
+                logger.debug("[DPI] Base64 decode failed")
+            if current == iteration_start:
+                break
+            if len(encodings) >= 5:
+                break
+        return current, encodings
 
     @staticmethod
     def _deep_decode(text: str, max_depth: int = 10) -> str:
@@ -245,7 +344,7 @@ class DPIEngine:
                         if _has_printable_content(decoded):
                             current = current.replace(cand, decoded, 1)
             except Exception:
-                pass
+                logger.debug("[DPI] Base64 decode failed")
             if current == prev:
                 break
         return current
@@ -265,14 +364,44 @@ class DPIEngine:
 
         if sqli_check:
             return DPIResult("sql_injection", "critical", f"SQLi in {uri}", 0.9, ["T1190"])
-        if self._detect_xss(decoded_body) or self._detect_xss(decoded_uri):
+        if xss_check:
             return DPIResult("xss_attempt", "high", f"XSS in {uri}", 0.85, ["T1190"])
-        if self._detect_cmd_injection(decoded_body) or self._detect_cmd_injection(decoded_uri):
+        if cmdi_check:
             return DPIResult("command_injection", "critical", f"CMD injection in {uri}", 0.9, ["T1190"])
         if self._detect_path_traversal(decoded_uri):
             return DPIResult("path_traversal", "high", f"Path traversal: {uri}", 0.85, ["T1190"])
         if self._detect_scanner(ua, decoded_uri):
             return DPIResult("scanner_detected", "low", f"Scanner: {ua}", 0.7, ["T1046"])
+
+        r = self._detect_hpp(uri)
+        if r:
+            return r
+        r = self._detect_cookie_injection(parsed.get("headers", {}))
+        if r:
+            return r
+        r = self._detect_header_injection(parsed.get("headers", {}))
+        if r:
+            return r
+        r = self._detect_websocket_upgrade(parsed.get("headers", {}))
+        if r:
+            return r
+        chunked = self._detect_chunked_encoding(body)
+        if chunked != body:
+            for part in self._detect_multipart(parsed.get("headers", {}), chunked):
+                decoded = self._decode(part)
+                if self._detect_sqli(decoded) or self._detect_xss(decoded) or self._detect_cmd_injection(decoded):
+                    return DPIResult("bypass_encoding", "high",
+                        "Attack hidden in chunked/multipart encoding", 0.85, ["T1190"])
+
+        r = self._smuggling_detector.analyze_http(parsed.get("headers", {}), parsed.get("src_ip", ""))
+        if r:
+            return DPIResult(
+                attack_type=r["attack_type"],
+                severity=r["severity"],
+                details=r["details"],
+                confidence=r.get("confidence", 0.8),
+                mitre=["T1190"],
+            )
 
         return None
 
@@ -312,6 +441,83 @@ class DPIEngine:
                         patterns["scanner_signature"].search(uri))
         scanner_agents = _get_scanner_agents()
         return any(s in ua.lower() for s in scanner_agents)
+
+    def _parse_http_params(self, uri: str) -> List[str]:
+        qs = uri.split("?", 1)[-1]
+        params = parse_qs(qs, keep_blank_values=True)
+        return [v for vals in params.values() for v in vals]
+
+    def _detect_hpp(self, uri: str) -> Optional[DPIResult]:
+        qs = uri.split("?", 1)
+        if len(qs) < 2:
+            return None
+        params = parse_qs(qs[1], keep_blank_values=True)
+        for key, vals in params.items():
+            if len(vals) > 1:
+                decoded = [self._decode(v) for v in vals]
+                for dv in decoded:
+                    if self._detect_sqli(dv) or self._detect_xss(dv) or self._detect_cmd_injection(dv):
+                        return DPIResult("http_parameter_pollution", "high",
+                            f"HPP in param {key}: {vals}", 0.85, ["T1190"])
+        return None
+
+    def _detect_chunked_encoding(self, body: str) -> Optional[str]:
+        if "transfer-encoding" not in body.lower():
+            return None
+        import re as _re
+        chunks = _re.findall(r'([0-9a-fA-F]+)\r\n(.*?)\r\n', body, _re.DOTALL)
+        if not chunks:
+            return body
+        reassembled = ""
+        for size_hex, data in chunks:
+            size = int(size_hex, 16)
+            if size == 0:
+                break
+            reassembled += data[:size]
+        return reassembled or body
+
+    def _detect_multipart(self, headers: Dict, body: str) -> List[str]:
+        ct = headers.get("content-type", "")
+        match = re.search(r'boundary=(?:"([^"]+)"|([^\s;]+))', ct, re.IGNORECASE)
+        if not match:
+            return [body]
+        boundary = match.group(1) or match.group(2)
+        parts = body.split(f"--{boundary}")
+        contents = []
+        for part in parts:
+            if "Content-Disposition" in part:
+                body_start = part.find("\r\n\r\n")
+                if body_start > 0:
+                    contents.append(part[body_start + 4:].strip())
+        return contents or [body]
+
+    def _detect_cookie_injection(self, headers: Dict) -> Optional[DPIResult]:
+        for key, val in headers.items():
+            if key.lower() == "cookie":
+                decoded = self._decode(val)
+                if self._detect_sqli(decoded) or self._detect_xss(decoded):
+                    return DPIResult("cookie_injection", "high",
+                        f"Malicious cookie: {val[:80]}", 0.85, ["T1190"])
+        return None
+
+    def _detect_header_injection(self, headers: Dict) -> Optional[DPIResult]:
+        override_headers = {"x-forwarded-for", "x-original-url", "x-rewrite-url",
+                           "x-http-method-override", "x-forwarded-host"}
+        for key, val in headers.items():
+            kl = key.lower()
+            if kl in override_headers:
+                decoded = self._decode(val)
+                if self._detect_sqli(decoded) or self._detect_xss(decoded) or self._detect_path_traversal(decoded):
+                    return DPIResult("header_injection", "high",
+                        f"Malicious override header {key}: {val[:80]}", 0.8, ["T1190"])
+        return None
+
+    def _detect_websocket_upgrade(self, headers: Dict) -> Optional[DPIResult]:
+        upgrade = headers.get("upgrade", "")
+        if upgrade.lower() == "websocket":
+            return DPIResult("websocket_upgrade", "low",
+                "WebSocket connection upgrade detected", 0.3, [])
+        return None
 
 
 _SUSPICIOUS_SNI_PATTERNS = None
