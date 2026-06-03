@@ -236,14 +236,20 @@ class LogParser:
                 # Parse timestamp
                 ts = self._parse_timestamp(groups.get('timestamp', ''))
 
+                # Check for web attacks inside the matched log line
+                attack_info = self._check_web_attack(line)
+                log_type = attack_info['attack_type'] if attack_info else pattern_name
+
                 return LogEvent(
                     timestamp=ts or datetime.now(),
                     source=source,
-                    log_type=pattern_name,
+                    log_type=log_type,
                     raw_line=line,
                     ip_address=groups.get('ip'),
                     username=groups.get('user'),
                     port=int(groups['port']) if groups.get('port') else None,
+                    method=groups.get('method'),
+                    path=groups.get('path'),
                     status_code=int(groups['status']) if groups.get('status') else None,
                     user_agent=groups.get('ua'),
                     extra=groups
@@ -287,7 +293,7 @@ class LogParser:
         # Map pattern keys to attack type names
         attack_type_map = {
             'sql_injection': 'sql_injection',
-            'xss': 'xss_attempt',
+            'xss': 'xss',
             'path_traversal': 'path_traversal',
             'lfi_attempt': 'lfi_attempt',
             'rfi_attempt': 'rfi_attempt',
@@ -297,7 +303,7 @@ class LogParser:
             'ssti_attempt': 'ssti_attempt',
             'deserialization': 'deserialization_attack',
             'ldap_injection': 'ldap_injection',
-            'scanner_signature': 'scanner_detected',
+            'scanner_signature': 'scanner',
             'admin_probe': 'admin_probe',
             'sensitive_file': 'sensitive_file_access',
             'api_enumeration': 'api_enumeration',
