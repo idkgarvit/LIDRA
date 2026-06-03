@@ -23,6 +23,8 @@ class Verdict(Enum):
 
 def decide_verdict(detections: List[Dict], ip_reputation: Optional[Dict] = None,
                    rate_info: Optional[Dict] = None) -> Verdict:
+    if not detections or not isinstance(detections, list):
+        return Verdict.PASS
     for d in detections:
         severity = d.get("severity", "low")
         if severity in ("critical", "high"):
