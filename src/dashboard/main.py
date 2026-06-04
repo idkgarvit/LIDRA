@@ -9,8 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pathlib import Path
 import uvicorn
-import asyncio
-import json
 
 from database.db import LIDRADatabase
 
@@ -26,6 +24,17 @@ app.add_middleware(
 
 db_path = Path(__file__).parent.parent.parent / "data" / "lidra.db"
 db = LIDRADatabase(str(db_path))
+
+# Load config for dashboard port
+_cfg_path = Path(__file__).parent.parent / "config" / "config.yaml"
+DASHBOARD_PORT = 9090
+try:
+    import yaml
+    with open(_cfg_path) as _f:
+        _cfg = yaml.safe_load(_f)
+    DASHBOARD_PORT = _cfg.get("dashboard", {}).get("port", 9090)
+except Exception:
+    logger.debug("[Dashboard] Config load failed, using default port")
 
 # Collector state (set by agent)
 collector_state = {
@@ -236,4 +245,4 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 """
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=DASHBOARD_PORT)
