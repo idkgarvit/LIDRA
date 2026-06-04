@@ -2,6 +2,7 @@ import logging
 import time
 import re
 from collections import defaultdict
+from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -12,7 +13,7 @@ _PARTIAL_SQL = re.compile(
     re.IGNORECASE
 )
 _PARTIAL_XSS = re.compile(
-    r"(<|>|script|javascript|on\w+\s*=|alert|eval|prompt|document\.)",
+    r"(script|javascript|on\w+\s*=|alert\(|eval\(|prompt|document\.)",
     re.IGNORECASE
 )
 _PARTIAL_CMD = re.compile(
@@ -26,14 +27,19 @@ _PARTIAL_TRAVERSAL = re.compile(
 
 
 class SessionCorrelator:
-    def __init__(self, window: int = 30, threshold: int = 3):
+    def __init__(self, window: int = 30, threshold: int = 5):
         self._window = window
         self._threshold = threshold
         self._fragments: Dict[str, List[Tuple[float, str, str]]] = defaultdict(list)
         self._last_cleanup = time.time()
         self._seen_combos: set = set()
+        self._lock = Lock()
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
+        with self._lock:
+            return self._analyze_locked(packet)
+
+    def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         self._cleanup_if_needed()
         payload = packet.get("payload", b"")
         if not payload:

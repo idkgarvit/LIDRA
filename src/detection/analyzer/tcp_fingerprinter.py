@@ -1,6 +1,7 @@
 import logging
 import time
 from collections import defaultdict
+from threading import Lock
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -24,8 +25,13 @@ class TCPFingerprinter:
         self._source_ips: Dict[str, int] = defaultdict(int)
         self._source_ww: Dict[str, List[int]] = defaultdict(list)
         self._last_cleanup = time.time()
+        self._lock = Lock()
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
+        with self._lock:
+            return self._analyze_locked(packet)
+
+    def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
         self._cleanup_if_needed()
         protocol = packet.get("protocol", "")

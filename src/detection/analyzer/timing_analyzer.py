@@ -1,19 +1,26 @@
 import logging
 import time
 from collections import defaultdict
+from threading import Lock
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class TimingAnalyzer:
-    def __init__(self):
+    def __init__(self, skip_ips: Optional[List[str]] = None):
         self._slow_loris: Dict[str, List[float]] = defaultdict(list)
         self._inter_arrival: Dict[str, List[float]] = defaultdict(list)
         self._time_gaps: Dict[str, List[float]] = defaultdict(list)
         self._last_cleanup = time.time()
+        self._lock = Lock()
+        self._skip_ips: List[str] = skip_ips or []
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
+        with self._lock:
+            return self._analyze_locked(packet)
+
+    def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
         self._cleanup_if_needed()
 
@@ -21,6 +28,19 @@ class TimingAnalyzer:
         protocol = packet.get("protocol", "")
         flags = packet.get("flags", "")
         payload = packet.get("payload", b"")
+
+        if src_ip in self._skip_ips:
+            return None
+
+        # Skip keepalive traffic (SSH, IRC PING/PONG) to avoid FP
+        if payload:
+            text = payload.decode("utf-8", errors="replace").strip()
+            if text in ("\x00", "") and protocol in ("tcp",):
+                return None
+            if text.upper() in ("PING", "PONG"):
+                return None
+            if protocol == "ssh" or b"SSH-" in payload[:8]:
+                return None
 
         now = time.time()
 

@@ -1,6 +1,7 @@
 import logging
 import time
 from collections import defaultdict
+from threading import Lock
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -19,8 +20,13 @@ class DoSDetector:
         self._icmp: Dict[str, List[float]] = defaultdict(list)
         self._bw: Dict[str, List[tuple]] = defaultdict(list)
         self._last_cleanup = time.time()
+        self._lock = Lock()
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
+        with self._lock:
+            return self._analyze_locked(packet)
+
+    def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
         self._maybe_cleanup()
         ip = packet.get("src_ip", "")

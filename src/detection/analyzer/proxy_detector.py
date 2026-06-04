@@ -1,6 +1,7 @@
 import logging
 import time
 from collections import defaultdict
+from threading import Lock
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -23,12 +24,17 @@ class ProxyDetector:
         self._proxy_header_counts: Dict[str, int] = defaultdict(int)
         self._tor_tracker: Dict[str, int] = defaultdict(int)
         self._last_cleanup = time.time()
+        self._lock = Lock()
 
     _TOR_NODES = {
         "1.2.3.4",
     }
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
+        with self._lock:
+            return self._analyze_locked(packet)
+
+    def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
         self._cleanup_if_needed()
 
@@ -106,7 +112,7 @@ class ProxyDetector:
                             })
                             break
         except Exception:
-            pass
+            logger.debug("[ProxyDetector] Header parse failed")
 
     def _cleanup_if_needed(self):
         if time.time() - self._last_cleanup > 60:

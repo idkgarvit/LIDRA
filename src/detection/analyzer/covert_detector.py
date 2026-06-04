@@ -1,6 +1,7 @@
 import logging
 import time
 from collections import defaultdict
+from threading import Lock
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -12,6 +13,7 @@ class CovertDetector:
         self._ttl_anomalies: Dict[str, List[int]] = defaultdict(list)
         self._ack_anomalies: Dict[str, List[int]] = defaultdict(list)
         self._last_cleanup = time.time()
+        self._lock = Lock()
         thresholds = (config or {}).get("thresholds", {}) if config else {}
         self._seq_threshold = thresholds.get("seq_covert_chars", 8)
         self._seq_samples = thresholds.get("seq_covert_samples", 10)
@@ -21,6 +23,10 @@ class CovertDetector:
         self._ttl_variations = thresholds.get("ttl_covert_variations", 6)
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
+        with self._lock:
+            return self._analyze_locked(packet)
+
+    def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
         self._cleanup_if_needed()
         src_ip = packet.get("src_ip", "")
@@ -119,7 +125,7 @@ class CovertDetector:
                             return {"attack_type": "header_covert_channel", "severity": "medium",
                                     "source_ip": "", "details": f"Suspicious header {key}: {val[:80]}"}
         except Exception:
-            pass
+            logger.debug("[Covert] Header parse failed")
         return None
 
     def _cleanup_if_needed(self):

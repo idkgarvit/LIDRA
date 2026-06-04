@@ -1,6 +1,7 @@
 import logging
 import time
 from collections import defaultdict
+from threading import Lock
 from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
@@ -21,11 +22,15 @@ class PortAnalyzer:
         self._port_scan_time: Dict[str, float] = {}
         self._service_mismatch: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
         self._last_cleanup = time.time()
+        self._lock = Lock()
         self._cleanup_interval = 60
         self._scan_threshold = 15
         self._window = 10
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
+        with self._lock:
+            return self._analyze_locked(packet)
+    def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
         self._cleanup_if_needed()
 

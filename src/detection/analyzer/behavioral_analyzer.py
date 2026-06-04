@@ -1,6 +1,7 @@
 import logging
 import time
 from collections import defaultdict, deque
+from threading import Lock
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -15,13 +16,28 @@ class BehavioralAnalyzer:
         self._conn_durations: Dict[str, deque] = defaultdict(lambda: deque(maxlen=30))
         self._conn_open: Dict[str, float] = {}
         self._last_cleanup = time.time()
+        self._lock = Lock()
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
+        with self._lock:
+            return self._analyze_locked(packet)
+
+    def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
         self._cleanup_if_needed()
         src_ip = packet.get("src_ip", "")
+        dst_ip = packet.get("dst_ip", "")
+        dst_port = packet.get("dst_port", 0)
         flags = packet.get("flags", "")
         protocol = packet.get("protocol", "")
+
+        # Skip broadcast/multicast/DHCP traffic to avoid FP
+        if dst_ip.startswith("255.") or dst_ip.startswith("224.") or dst_ip.startswith("239."):
+            return None
+        if dst_ip == "0.0.0.0" or dst_ip == "255.255.255.255":
+            return None
+        if dst_port in (67, 68, 5353, 1900):
+            return None
 
         r = self._check_syn_burst(src_ip, flags)
         if r:

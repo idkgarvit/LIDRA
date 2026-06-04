@@ -1,6 +1,7 @@
 import logging
 import time
 from collections import defaultdict
+from threading import Lock
 from typing import Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
@@ -10,9 +11,13 @@ class FragmentAnalyzer:
     def __init__(self):
         self._frag_tracker: Dict[str, List[Dict]] = defaultdict(list)
         self._last_cleanup = time.time()
+        self._lock = Lock()
         self._cleanup_interval = 60
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
+        with self._lock:
+            return self._analyze_locked(packet)
+    def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
         self._cleanup_if_needed()
 
