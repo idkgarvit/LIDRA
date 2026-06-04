@@ -123,7 +123,7 @@ class LogParser:
     WEB_ATTACK_PATTERNS = {
         # OWASP Top 10
         'sql_injection': re.compile(
-            r"(union[\s/*]+select|select[\s/*]+.*[\s/*]+from|insert\s+into|update\s+.*\s+set|delete\s+from|drop\s+table|;\s*--|'\s*or\s*'|\"\s*or\s*\"|'\s*and\s*'|1\s*=\s*1|0x[0-9a-f]+)",
+            r"(union[\s/*]+select|select[\s/*]+.*[\s/*]+from|insert\s+into|update\s+.*\s+set|delete\s+from|drop\s+table|;\s*--|'\s*--|\"\s*--|'\s*#|\"\s*#|'\s*or\s*'|\"\s*or\s*\"|'\s*and\s*'|1\s*=\s*1|1\s*=\s*2|0x[0-9a-f]+)",
             re.IGNORECASE
         ),
         'xss': re.compile(

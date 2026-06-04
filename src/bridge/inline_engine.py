@@ -9,6 +9,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
+from detection.log_parser import LogParser
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class InlineEngine:
         )
         self._dpi_engine = DPIEngine(
             rules_loader=None,
-            log_parser=None
+            log_parser=LogParser
         )
 
         from detection.analyzer.dos_detector import DoSDetector

@@ -3,7 +3,7 @@ import re
 import base64
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-from urllib.parse import unquote, parse_qs
+from urllib.parse import unquote, unquote_plus, parse_qs
 
 from detection.fingerprint.tls_fingerprinter import TLSFingerprinter
 from detection.anomaly.smuggling_detector import SmugglingDetector
@@ -273,7 +273,7 @@ class DPIEngine:
         for _ in range(max_depth):
             iteration_start = current
             prev = current
-            current = unquote(current)
+            current = unquote_plus(current)
             if current != prev:
                 encodings.add("url")
             prev = current
@@ -327,7 +327,7 @@ class DPIEngine:
         current = text
         for _ in range(max_depth):
             prev = current
-            current = unquote(current)
+            current = unquote_plus(current)
             current = _UNICODE_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
             current = _HEX_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
             current = _HEX_ENTITY_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
@@ -411,7 +411,9 @@ class DPIEngine:
             return bool(patterns["sql_injection"].search(text))
         return bool(re.search(
             r"(union[\s/*]+select|select[\s/*]+.*[\s/*]+from|insert\s+into|"
-            r"drop\s+table|;\s*--|'\s*or\s*'|\"\s*or\s*\"|1\s*=\s*1)",
+            r"update\s+.*\s+set|delete\s+from|drop\s+table|;\s*--|'\s*--|"
+            r"\"\s*--|'\s*#|\"\s*#|'\s*or\s*'|\"\s*or\s*\"|'\s*and\s*'|"
+            r"1\s*=\s*1|1\s*=\s*2|0x[0-9a-f]+)",
             text, re.IGNORECASE))
 
     def _detect_xss(self, text: str) -> bool:
