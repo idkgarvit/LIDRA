@@ -25,6 +25,8 @@ class L2Analyzer:
 
         src_ip = packet.get("src_ip", "")
         src_mac = packet.get("src_mac", "")
+        dst_ip = packet.get("dst_ip", "")
+        dst_mac = packet.get("dst_mac", "")
         eth_type = packet.get("eth_type", 0)
         raw_len = packet.get("raw_len", 0)
 
@@ -45,7 +47,7 @@ class L2Analyzer:
                 })
                 self._mac_tracker[src_ip] = []
 
-        if src_ip:
+        if self._is_broadcast(dst_ip, dst_mac):
             self._broadcast_counts[src_ip] += 1
             if self._broadcast_counts[src_ip] > 500:
                 detections.append({
@@ -64,6 +66,20 @@ class L2Analyzer:
             })
 
         return detections if detections else None
+
+    @staticmethod
+    def _is_broadcast(dst_ip: str, dst_mac: str) -> bool:
+        if dst_mac and dst_mac.lower() in ("ff:ff:ff:ff:ff:ff", "ffff.ffff.ffff"):
+            return True
+        if not dst_ip:
+            return False
+        if dst_ip == "255.255.255.255":
+            return True
+        if dst_ip.endswith(".255"):
+            return True
+        if dst_ip.startswith("ff"):
+            return True
+        return False
 
     def _check_arp_spoof(self, ip, mac, packet):
         now = time.time()

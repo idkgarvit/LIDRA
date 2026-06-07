@@ -103,15 +103,32 @@ class TCPFingerprinter:
             return None
         self._source_isns[ip].append(seq)
         recent = self._source_isns[ip][-5:]
-        if len(recent) >= 3:
+        if len(recent) >= 4:
             gaps = [abs(recent[i + 1] - recent[i]) for i in range(len(recent) - 1)]
-            low_entropy = all(g < 1000 for g in gaps)
-            if low_entropy:
+            # Suspicious patterns:
+            #   1. All gaps <100 = spoofed packet with constant counter
+            #   2. Zero gaps = identical ISNs (replay/duplication)
+            #   3. All gaps equal = predictable linear pattern
+            if all(g == 0 for g in gaps):
                 return {
                     "attack_type": "low_entropy_isn",
-                    "severity": "medium",
+                    "severity": "high",
                     "source_ip": ip,
-                    "details": f"ISN increments <1000 in {len(gaps)} samples (possible spoofing)",
+                    "details": f"Identical ISNs in {len(gaps)} samples (possible replay/spoofing)",
+                }
+            if all(g < 100 for g in gaps):
+                return {
+                    "attack_type": "low_entropy_isn",
+                    "severity": "high",
+                    "source_ip": ip,
+                    "details": f"ISN increments <100 in {len(gaps)} samples (likely spoofed counter)",
+                }
+            if len(set(gaps)) == 1 and gaps[0] < 10000:
+                return {
+                    "attack_type": "low_entropy_isn",
+                    "severity": "high",
+                    "source_ip": ip,
+                    "details": f"Predictable ISN deltas (constant {gaps[0]}) in {len(gaps)} samples",
                 }
         return None
 

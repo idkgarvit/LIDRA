@@ -135,14 +135,22 @@ class BehavioralAnalyzer:
                 }
         return None
 
-    @staticmethod
-    def _check_short_connections(ip: str, duration: float) -> Optional[Dict]:
-        if duration < 0.5:
+    def _check_short_connections(self, ip: str, duration: float) -> Optional[Dict]:
+        # A single short connection is normal HTTP. Only flag if MANY
+        # recent connections from the same IP are short — that's the
+        # actual scan pattern.
+        if duration >= 0.5:
+            return None
+        recent = self._conn_durations[ip]
+        if len(recent) < 10:
+            return None
+        short_count = sum(1 for d in recent if d < 0.5)
+        if short_count >= 10:
             return {
                 "attack_type": "short_connection",
-                "severity": "low",
+                "severity": "medium",
                 "source_ip": ip,
-                "details": f"Connection closed in {duration*1000:.0f}ms (possible scan)",
+                "details": f"{short_count}/{len(recent)} recent connections closed in <500ms (possible scan)",
             }
         return None
 

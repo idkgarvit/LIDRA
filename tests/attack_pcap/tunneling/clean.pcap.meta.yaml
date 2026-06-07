@@ -6,20 +6,17 @@ mitre: null
 severity: info
 expected_attack_types: []     # Must be empty — no FP allowed
 expected_min_confidence: 0.0
-expected_max_false_positives: 5000
-# Currently flags 4470 packets. Threshold catches regression.
-fp_rate_baseline: 0.90
+expected_max_false_positives: 500
+fp_rate_baseline: 0.073
 notes: |
   1MB of normal DNS traffic. Used to confirm we don't flag normal
   DNS as tunneling.
 
-  KNOWN HIGH FP RATE: 90% (4470/4956 packets flagged).
-  - broadcast_storm: 3954x — over-eager threshold
-  - port_scan: 2449x — DNS ANY/AXFR queries look like port scan
-  - command_injection: 40x
-  - port_hopping: 495x
-  - ipv6_tunnel: 314x
-  - dns_tunnel: 8x — only 8 false dns_tunnel detections, OK
+  CURRENT FP RATE: 7.3% (364/4956 packets flagged).
+  - ipv6_tunnel: 314x — false positive on encoded DNS names
+  - command_injection: 40x — false on DNS base64 payloads
+  - dns_tunnel: 8x — borderline; high-entropy queries trigger this
+  - session_correlated_*: 4x
 
-  Threshold of 5000 catches regression (currently 4470).
-  Tracked in COVERAGE.md as tuning debt.
+  Threshold of 500 catches regression (currently 364).
+  Tracked in COVERAGE.md as remaining tuning debt.

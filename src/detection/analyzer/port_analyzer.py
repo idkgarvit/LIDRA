@@ -20,12 +20,23 @@ class PortAnalyzer:
     def __init__(self):
         self._port_scan_tracker: Dict[str, Set[int]] = defaultdict(set)
         self._port_scan_time: Dict[str, float] = {}
+        self._port_hopping_tracker: Dict[Tuple[str, str], Set[int]] = defaultdict(set)
+        self._port_hopping_time: Dict[Tuple[str, str], float] = {}
         self._service_mismatch: Dict[str, List[Tuple[int, str]]] = defaultdict(list)
         self._last_cleanup = time.time()
         self._lock = Lock()
         self._cleanup_interval = 60
         self._scan_threshold = 15
         self._window = 10
+
+    @staticmethod
+    def _is_scan_syn(flags: str, protocol: str) -> bool:
+        """A port scan is initiated by a pure SYN, not a SYN-ACK or
+        response packet. UDP and ICMP don't have TCP flags and must not
+        be treated as port scans here (they have their own detectors)."""
+        if protocol != "tcp":
+            return False
+        return "S" in flags and "A" not in flags
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
         with self._lock:
@@ -41,11 +52,11 @@ class PortAnalyzer:
         protocol = packet.get("protocol", "")
         flags = packet.get("flags", "")
 
-        scan_detection = self._check_port_scan(src_ip, dst_port, flags)
+        scan_detection = self._check_port_scan(src_ip, dst_port, flags, protocol)
         if scan_detection:
             detections.append(scan_detection)
 
-        hop_detection = self._check_port_hopping(src_ip, dst_ip, dst_port, protocol)
+        hop_detection = self._check_port_hopping(src_ip, dst_ip, dst_port, protocol, flags)
         if hop_detection:
             detections.append(hop_detection)
 
@@ -57,13 +68,12 @@ class PortAnalyzer:
 
         return detections if detections else None
 
-    def _check_port_scan(self, ip: str, port: int, flags: str) -> Optional[Dict]:
+    def _check_port_scan(self, ip: str, port: int, flags: str, protocol: str = "tcp") -> Optional[Dict]:
+        if not self._is_scan_syn(flags, protocol):
+            return None
+
         now = time.time()
         elapsed = now - self._port_scan_time.get(ip, now)
-
-        if "S" in flags and "A" in flags:
-            self._port_scan_time[ip] = now
-            return None
 
         if elapsed > self._window:
             self._port_scan_tracker[ip] = set()
@@ -83,11 +93,18 @@ class PortAnalyzer:
             }
         return None
 
-    def _check_port_hopping(self, src_ip: str, dst_ip: str, port: int, protocol: str) -> Optional[Dict]:
+    def _check_port_hopping(self, src_ip: str, dst_ip: str, port: int, protocol: str, flags: str = "") -> Optional[Dict]:
+        if not self._is_scan_syn(flags, protocol):
+            return None
+
         now = time.time()
         key = (src_ip, dst_ip)
-        self._port_scan_tracker[key].add(port)
-        count = len(self._port_scan_tracker[key])
+        elapsed = now - self._port_hopping_time.get(key, now)
+        if elapsed > self._window:
+            self._port_hopping_tracker[key] = set()
+            self._port_hopping_time[key] = now
+        self._port_hopping_tracker[key].add(port)
+        count = len(self._port_hopping_tracker[key])
 
         if count >= 5 and count % 5 == 0:
             return {
@@ -114,8 +131,12 @@ class PortAnalyzer:
         now = time.time()
         if now - self._last_cleanup > self._cleanup_interval:
             cutoff = now - self._window * 2
-            stale = [ip for ip, t in self._port_scan_time.items() if t < cutoff]
-            for ip in stale:
-                del self._port_scan_tracker[ip]
-                del self._port_scan_time[ip]
+            stale_ips = [ip for ip, t in self._port_scan_time.items() if t < cutoff]
+            for ip in stale_ips:
+                self._port_scan_tracker.pop(ip, None)
+                self._port_scan_time.pop(ip, None)
+            stale_keys = [k for k, t in self._port_hopping_time.items() if t < cutoff]
+            for k in stale_keys:
+                self._port_hopping_tracker.pop(k, None)
+                self._port_hopping_time.pop(k, None)
             self._last_cleanup = now

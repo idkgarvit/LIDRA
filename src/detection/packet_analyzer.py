@@ -2,21 +2,14 @@ import logging
 import time
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Optional, Set
-import yaml
+from utils.config_loader import get_cfg
 
 logger = logging.getLogger(__name__)
 
 
 def _get_threshold(key, default):
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    try:
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        return cfg.get("thresholds", {}).get(key, default)
-    except Exception:
-        return default
+    return get_cfg(f"thresholds.{key}", default)
 
 
 class PacketAnalyzer:
@@ -48,14 +41,15 @@ class PacketAnalyzer:
             return blocklist_result
 
         if protocol == "tcp":
-            if "S" in flags and "A" not in flags:
+            is_syn = "S" in flags and "A" not in flags
+            if is_syn:
                 syn_result = self._check_syn_flood(src_ip)
                 if syn_result:
                     return syn_result
 
-            scan_result = self._check_port_scan(src_ip, dst_port)
-            if scan_result:
-                return scan_result
+                scan_result = self._check_port_scan(src_ip, dst_port)
+                if scan_result:
+                    return scan_result
 
             flag_result = self._check_invalid_flags(flags)
             if flag_result:

@@ -5,18 +5,17 @@ attack_category: benign
 mitre: null
 severity: info
 expected_attack_types: []
-expected_max_false_positives: 800
-fp_rate_baseline: 0.76
+expected_max_false_positives: 150
+fp_rate_baseline: 0.08
 notes: |
   Small but representative. 1200 packets of normal HTTP traffic.
   Used as the "this is what normal looks like" baseline.
 
-  KNOWN HIGH FP RATE: 76% (914/1200 packets flagged).
-  - port_scan: 548x — fires because 50 sources hit one target
-  - short_connection: 200x — fires on every short HTTP session
-  - low_entropy_isn: 108x — false positive in TCP fingerprinter
-  - port_hopping: 40x
-  - session_correlated_sql_attack: 18x
+  CURRENT FP RATE: 7.75% (93/1200 packets flagged).
+  - low_entropy_isn: 71x — still FP-prone (consecutive ISNs in tests
+    happen to be similar). Real networks show more entropy.
+  - session_correlated_sql_attack: 18x — false positive in correlator
+  - short_connection: 4x
 
-  Threshold of 1000 catches regression (currently 914, 86 buffer).
-  Tracked as tuning debt in COVERAGE.md.
+  Threshold of 150 catches regression (currently 93, 57 buffer).
+  Tracked as remaining tuning debt in COVERAGE.md.
