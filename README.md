@@ -42,7 +42,20 @@ nano config/config.yaml
 python src/lidra_agent_v3.py
 ```
 
-Dashboard available at `http://localhost:8080`
+Dashboard: TUI mode (run with `--tui`).
+
+## Demo (60 seconds)
+
+End-to-end demo of three real attacks (SQL injection, port scan,
+DNS tunnel). See **[DEMO.md](DEMO.md)** for the walkthrough.
+
+```bash
+# Terminal 1: start the TUI
+sudo -E python3 -m src.lidra_agent_v3 --tui
+
+# Terminal 2: run the demo (starts vuln_server, fires 3 attacks)
+./demo/run_all.sh
+```
 
 ## Architecture
 
