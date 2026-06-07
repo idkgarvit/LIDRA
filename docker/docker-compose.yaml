@@ -7,8 +7,11 @@ services:
       dockerfile: docker/Dockerfile
     container_name: lidra-core
     hostname: lidra
-    
-    # eBPF requires privileged mode or specific capabilities
+
+    # The agent needs AF_PACKET raw sockets, NFQUEUE, and iptables.
+    # privileged: true is the simplest way; cap_add below would also work
+    # (CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_ADMIN, CAP_SYS_PTRACE) but the
+    # eth0 BPF loader and the eBPF fallback paths assume full privilege.
     privileged: true
     
     environment:

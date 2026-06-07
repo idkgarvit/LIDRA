@@ -3,6 +3,10 @@ mode: local  # 'inline' (gateway bridge) | 'local' (same-machine) | 'monitor' (l
 log_dir: ./logs
 state_dir: ./state
 
+# General settings
+general:
+  verbose: true  # enable DEBUG-level logging for test
+
 # Database configuration
 database:
   path: ./data/lidra.db
@@ -19,6 +23,45 @@ bridge:
   nfqueue_num: 0
   nfqueue_maxlen: 1024
 
+# =============================================================================
+# INLINE GATEWAY (BRIDGE) DEPLOYMENT — company/enterprise box
+# =============================================================================
+# The LIDRA box sits inline between the firewall and the protected network.
+#
+#   [Internet] -> [Firewall] -> [LIDRA box (2 NICs or 1 NIC + bridge)] -> [LAN]
+#
+# - WAN NIC faces the firewall (internet side)
+# - LAN NIC faces the protected server(s)
+# - LIDRA bridges WAN and LAN transparently and inspects every packet
+#   crossing FORWARD in both directions via NFQUEUE.
+# - Set `mode: inline` at the top of this file and define the interfaces below.
+#
+# The module src/bridge/bridge_setup.py owns this section.  In a real
+# deployment you would run LIDRA on a dedicated host with two physical NICs
+# (or one NIC + a transparent linux-bridge with `br_lidra` member interfaces).
+# =============================================================================
+# bridge_gw:
+#   mode: bridge                    # "bridge" = transparent inline gateway
+#   interfaces:
+#     wan: eth0                     # internet-facing NIC (e.g. from firewall)
+#     lan: eth1                     # server-facing NIC (e.g. to internal LAN)
+#     # auto-detect: leave null to use src.utils.interface.detect_interface()
+#   bridge_name: br_lidra           # Linux bridge that joins WAN+LAN
+#   stp_enabled: true               # Spanning Tree (safe default; turn off
+#                                   # only if the upstream switch already runs
+#                                   # STP and you want faster convergence)
+#   management_ip: 10.0.0.1/24      # optional mgmt IP on the bridge itself
+#   nfqueue_num: 0                  # NFQUEUE number for the FORWARD chain
+#   nfqueue_chain: FORWARD          # FORWARD for bridge mode, INPUT for local
+#   ip_forwarding: true             # set /proc/sys/net/ipv4/ip_forward=1
+#   nat:
+#     enabled: true                 # MASQUERADE LAN -> WAN when LIDRA is the gateway
+#     outbound_iface: eth0          # the WAN NIC to masquerade on
+#   forwarding_rules:
+#     allow_established: true       # add FORWARD ACCEPT on ESTABLISHED,RELATED
+#     queue_bypass: true            # use --queue-bypass so unrouted pkts pass
+#   firewall_backend: nftables      # "nftables" (preferred) or "iptables"
+
 # Local (same-machine) mode — iptables INPUT NFQUEUE
 local:
   interface: null  # auto-detect if null
@@ -28,6 +71,12 @@ local:
 # Inline Engine Configuration
 inline:
   enabled: true
+  flow_cache:
+    capacity: 5000
+    clean_threshold: 15  # packets before skipping DPI on clean flows
+  bloom:
+    capacity: 50000
+    error_rate: 0.001
   dpi:
     enabled: true
     max_reassembly_buffers: 10000
@@ -73,7 +122,6 @@ http_ports:
   - 8443
   - 3000
   - 9090
-  - 5000
   - 5000
 
 # Suspicious ports (was hardcoded in packet_sniffer.py)
@@ -223,7 +271,7 @@ deception:
 response:
   block_command: block_ip.sh
   block_ttl_seconds: 3600
-  dry_run: false  # Set to false for production blocking
+  dry_run: true  # Safety for live test
   firewall: nftables  # nftables for bridge mode, iptables for legacy
 
 # Alerting configuration
@@ -239,12 +287,24 @@ alerts:
     from_addr: ""
     to_addrs: []
 
+# Secrets are resolved via env vars with fallback to config values:
+#   LIDRA_SMTP_PASSWORD  → alerts.email.password
+#   LIDRA_ABUSEIPDB_KEY  → threat_intel.abuseipdb_api_key
+#   LIDRA_VT_KEY         → threat_intel.virustotal_api_key
+
 # Threat Intelligence
 threat_intel:
-  abuseipdb_api_key: ""  # Get free key at abuseipdb.com
-  virustotal_api_key: ""  # Get free key at virustotal.com
+  abuseipdb_api_key: ""  # Override via LIDRA_ABUSEIPDB_KEY env var
+  virustotal_api_key: ""  # Override via LIDRA_VT_KEY env var
   check_on_detect: true
   auto_report: true
+  cache_ttl_seconds: 3600   # Re-query upstream scores after 1h
+  max_cache: 10000          # LRU cap on cached IPs
+
+# Main periodic loop (honeypot poll, ML baseline, DB cleanup, …)
+main_loop:
+  cycle_seconds: 60         # 60s in dev, 300s in prod (legacy). Lower = more responsive
+                             # but more CPU on log re-reads. 60s is a good production default.
 
 # IP Whitelist (never block these)
 whitelist:
@@ -264,6 +324,8 @@ collectors:
   syslog:
     enabled: true
     port: 514
+    bind: "0.0.0.0"  # Listen address; set to "127.0.0.1" for local-only
+    rate_limit: 100  # max messages/sec per source IP
 
 # Terminal UI Configuration
 tui:
@@ -271,5 +333,39 @@ tui:
   refresh_rate: 4
   standalone: false  # Set to True to run TUI standalone with mock data
 
-dashboard:
-  port: 9090  # Web dashboard port (avoid 8080 conflict with bridge server)
+# TLS fingerprinting — known malicious JA4 hashes
+tls_fingerprints:
+  malicious_ja4: []  # Populate from abuse.ch / suricata
+
+# False-Positive Allowlist (reduces noise from known-good sources)
+allowlist:
+  enabled: true
+  include_cloudflare: true   # Skip noisy detections from Cloudflare IPs
+  include_google: false      # Include Google IPs (DNS, services) only if needed
+  include_aws: false         # Include AWS ranges only if you don't host there
+  suppress_private: true     # Skip RFC1918 + loopback + multicast
+  suppress_cloudflare: true  # Apply Cloudflare suppression
+  suppress_google: false
+  suppress_aws: false
+  trusted_cidrs: []          # Custom trusted ranges. Examples:
+                              #   ["203.0.113.0/24"]   - whole subnet
+                              #   ["198.51.100.42"]    - single host (auto-converted to /32)
+                              #   ["10.0.0.0/8"]       - private range
+                              #   ["0.0.0.0/0"]        - trust everything (not recommended)
+  trusted_cidrs_v6: []       # IPv6 trusted ranges, e.g. ["2001:db8::/32"]
+
+# BRIDGE / INLINE GATEWAY MODE (organization deployment)
+# Topology:  Internet → Firewall → [LIDRA box: WAN↔LAN bridge] → Internal network
+# Uncomment the block below and set interface names for your hardware.
+# bridge:
+#   interfaces:
+#     wan: eth0        # Internet-facing NIC (from firewall)
+#     lan: eth1        # Internal-facing NIC (to your network/server)
+#   bridge_name: br_lidra
+#   management_ip: 10.0.0.1/24   # IP for the bridge itself
+#   stp_enabled: false            # Spanning tree (usually off for 2-NIC bridges)
+#   nfqueue_num: 0
+#   nfqueue_maxlen: 1024
+#   enable_nat: false             # Set true if LIDRA box is the gateway
+#   masquerade_interface: wan     # Which iface to MASQUERADE (if enable_nat)
+#   auto_create: false            # Set true to create bridge on start (needs root)

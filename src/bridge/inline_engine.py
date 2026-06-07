@@ -529,7 +529,7 @@ class InlineEngine:
                 if result:
                     detections.extend(result)
             except Exception as e:
-                logger.debug(f"[{type(analyzer).__name__}] error: {e}")
+                logger.warning(f"[{type(analyzer).__name__}] analyzer error: {e}")
 
         if detections:
             self._flow_cache.mark_suspicious(flow_key)
@@ -594,7 +594,7 @@ class InlineEngine:
                     return packet
 
             except Exception as e:
-                logger.debug(f"dpkt parse error: {e}")
+                logger.warning(f"[InlineEngine] dpkt parse error: {e}")
                 return None
         else:
             return self._minimal_parse(raw_data)
@@ -711,12 +711,12 @@ class InlineEngine:
                     packet["payload_len"] = len(packet["payload"])
                 return packet
         except Exception as e:
-            logger.debug(f"minimal parse error: {e}")
+            logger.warning(f"[InlineEngine] minimal parse error: {e}")
         return None
 
     def _run_nfqueue_capture(self):
         queue_num = self._queue_num
-        if not self._setup_nfqueue_nft():
+        if not self._setup_nfqueue_nft(self._nfqueue_chain()):
             raise RuntimeError("Failed to set up nftables queue rule")
         sock = None
         try:
@@ -736,8 +736,8 @@ class InlineEngine:
                                       "PF_UNBIND AF_INET", request_ack=False)
                 self._nfq_send_config(sock, NFQNL_CFG_CMD_UNBIND, socket.AF_INET, queue_num,
                                       "UNBIND", request_ack=False)
-            except Exception:
-                logger.debug("[InlineEngine] Stale NFQUEUE unbind skipped (expected)")
+            except Exception as e:
+                logger.debug(f"[InlineEngine] Stale NFQUEUE unbind skipped: {e}")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET, 0, "PF_BIND AF_INET")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET6, 0, "PF_BIND AF_INET6")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_BIND, socket.AF_INET, queue_num, "BIND")
@@ -829,7 +829,7 @@ class InlineEngine:
                     pkt_batch_count += 1
                 detections = self._run_detection_pipeline(packet)
                 verdict = decide_verdict(detections)
-                nf_verdict = NF_ACCEPT if verdict in (Verdict.PASS, Verdict.RATE_LIMIT) else NF_DROP
+                nf_verdict = self._apply_nf_verdict(verdict)
                 self._nfq_send_verdict(sock, nf_verdict, packet_id, queue_num)
                 self._apply_verdict(packet_id, verdict, packet, detections, time.time())
                 if detections:
@@ -899,31 +899,32 @@ class InlineEngine:
         except Exception as e:
             logger.warning(f"[InlineEngine] Failed to send verdict: {e}")
 
-    def _setup_nfqueue_nft(self):
+    def _setup_nfqueue_nft(self, chain: str = "input"):
         interface = self._get_interface()
         queue_num = self._queue_num
+        nft_tool, nft_family, hook_priority, hook = self._nfqueue_nft_params(chain)
         try:
-            subprocess.run(["nft", "add", "table", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
+            subprocess.run([nft_tool, "add", "table", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
                            capture_output=True, timeout=5)
-            subprocess.run(["nft", "add", "chain", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), "input",
-                           "{", "type", "filter", "hook", "input", "priority", "0;",
+            subprocess.run([nft_tool, "add", "chain", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain,
+                           "{", "type", "filter", "hook", hook, "priority", f"{hook_priority};",
                            "policy", "accept;", "}"],
                            capture_output=True, timeout=5)
-            subprocess.run(["nft", "flush", "chain", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), "input"],
+            subprocess.run([nft_tool, "flush", "chain", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain],
                            capture_output=True, timeout=5)
-            cmd = ["nft", "add", "rule", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), "input",
+            cmd = [nft_tool, "add", "rule", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain,
                    "meta", "iifname", interface,
                    "queue", "num", str(queue_num)]
             result = subprocess.run(cmd, capture_output=True, timeout=5)
             if result.returncode != 0:
-                cmd = ["nft", "add", "rule", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), "input",
+                cmd = [nft_tool, "add", "rule", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain,
                        "queue", "num", str(queue_num)]
                 result = subprocess.run(cmd, capture_output=True, timeout=5)
                 if result.returncode != 0:
                     logger.warning(f"[InlineEngine] nft queue rule failed: {result.stderr.decode()}")
                     self._teardown_nfqueue_nft()
                     return False
-            logger.info(f"[InlineEngine] nftables queue {queue_num} on {interface}")
+            logger.info(f"[InlineEngine] nftables queue {queue_num} on {interface} (chain={chain})")
             return True
         except Exception as e:
             logger.warning(f"[InlineEngine] nftables setup error: {e}")
@@ -934,8 +935,41 @@ class InlineEngine:
         try:
             subprocess.run(["nft", "delete", "table", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
                            capture_output=True, timeout=5)
-        except Exception:
-            logger.debug("[InlineEngine] NFQUEUE teardown skipped (not active)")
+        except Exception as e:
+            logger.warning(f"[InlineEngine] NFQUEUE teardown skipped: {e}")
+
+    def _is_bridge_mode(self) -> bool:
+        bridge_cfg = self._config.get("bridge", {})
+        if bridge_cfg.get("enabled") is True:
+            return True
+        if bridge_cfg.get("bridge_name"):
+            return True
+        if bridge_cfg.get("interfaces", {}).get("wan") and bridge_cfg.get("interfaces", {}).get("lan"):
+            return True
+        return self._config.get("mode") == "inline"
+
+    def _nfqueue_chain(self) -> str:
+        bridge_cfg = self._config.get("bridge", {})
+        return str(bridge_cfg.get("nfqueue_chain", "FORWARD" if self._is_bridge_mode() else "INPUT")).lower()
+
+    @staticmethod
+    def _nfqueue_nft_params(chain: str):
+        chain_l = (chain or "input").lower()
+        if chain_l == "forward":
+            return ("nft", "bridge", 0, "forward")
+        if chain_l == "output":
+            return ("nft", "inet", 0, "output")
+        return ("nft", "inet", 0, "input")
+
+    def setup_nfqueue_chain(self, chain: str = "FORWARD") -> bool:
+        return self._setup_nfqueue_nft(chain.lower())
+
+    def _apply_nf_verdict(self, verdict: Verdict) -> int:
+        if verdict in (Verdict.PASS, Verdict.RATE_LIMIT):
+            return NF_ACCEPT
+        if verdict == Verdict.DROP:
+            return NF_DROP
+        return NF_ACCEPT
 
     def get_stats(self) -> Dict:
         with self._lock:

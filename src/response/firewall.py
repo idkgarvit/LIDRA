@@ -1,14 +1,34 @@
 # src/response/firewall.py
 """Production firewall integration for LIDRA."""
 
+import ipaddress
 import subprocess
 import logging
-from pathlib import Path
 from typing import Optional, List
 import re
 import threading
 
 logger = logging.getLogger(__name__)
+
+
+_IPV4_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
+
+
+def _validate_ip(ip: str) -> str:
+    """Validate and normalize an IP address. Raises ValueError on bad input."""
+    if not isinstance(ip, str) or not ip:
+        raise ValueError("IP must be a non-empty string")
+    if not _IPV4_RE.match(ip):
+        raise ValueError(f"Invalid IP format: {ip!r}")
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except (ipaddress.AddressValueError, ValueError) as exc:
+        raise ValueError(f"Invalid IPv4 address: {ip!r}") from exc
+    if addr.is_multicast or addr.is_unspecified:
+        raise ValueError(f"Refusing to block special-use IP: {ip}")
+    if addr.is_loopback:
+        raise ValueError(f"Refusing to block loopback: {ip}")
+    return str(addr)
 
 
 class FirewallManager:
@@ -28,34 +48,55 @@ class FirewallManager:
             self._ensure_chain()
 
     def _ensure_chain(self):
-        """Create LIDRA chain if it doesn't exist."""
+        """Create LIDRA chain if it doesn't exist; flush stale rules first."""
+        if not self._has_iptables():
+            logger.warning("iptables not available; skipping chain creation")
+            return
         try:
-            result = subprocess.run(
+            check = subprocess.run(
                 ["iptables", "-L", self.chain, "-n"],
-                capture_output=True,
-                check=False
+                capture_output=True, check=False
             )
-            if result.returncode != 0:
+            if check.returncode != 0:
                 subprocess.run(["iptables", "-N", self.chain], check=False)
                 subprocess.run(["iptables", "-I", "INPUT", "-j", self.chain], check=False)
                 logger.info(f"Created iptables chain: {self.chain}")
+            else:
+                subprocess.run(["iptables", "-F", self.chain], check=False, capture_output=True)
+                logger.debug(f"Flushed stale rules from existing chain: {self.chain}")
         except Exception as e:
             logger.warning(f"Could not ensure iptables chain: {e}")
 
+    @staticmethod
+    def _has_iptables() -> bool:
+        return subprocess.run(
+            ["which", "iptables"], capture_output=True, check=False
+        ).returncode == 0
+
     def block_ip(self, ip: str, ttl_seconds: int = 3600) -> bool:
-        """Block an IP address."""
+        """Block an IP address. Idempotent — duplicate calls are no-ops."""
+        try:
+            ip = _validate_ip(ip)
+        except ValueError as e:
+            logger.error(f"Refusing to block invalid IP: {e}")
+            return False
         if self.dry_run:
             logger.info(f"[DRY-RUN] Would block {ip} for {ttl_seconds}s")
             return True
 
         try:
-            # Add block rule
+            check = subprocess.run(
+                ["iptables", "-C", self.chain, "-s", ip, "-j", "DROP"],
+                capture_output=True, check=False
+            )
+            if check.returncode == 0:
+                logger.debug(f"[Firewall] {ip} already blocked in {self.chain}; skipping append")
+                return True
             subprocess.run(
                 ["iptables", "-A", self.chain, "-s", ip, "-j", "DROP"],
                 check=True,
                 capture_output=True
             )
-            # Schedule removal
             self._schedule_unblock(ip, ttl_seconds)
             logger.info(f"Blocked {ip} for {ttl_seconds}s")
             return True
@@ -73,6 +114,11 @@ class FirewallManager:
     def _unblock_ip(self, ip: str):
         """Remove block rule for IP."""
         try:
+            ip = _validate_ip(ip)
+        except ValueError as e:
+            logger.error(f"Refusing to unblock invalid IP: {e}")
+            return
+        try:
             subprocess.run(
                 ["iptables", "-D", self.chain, "-s", ip, "-j", "DROP"],
                 check=False,
@@ -84,6 +130,11 @@ class FirewallManager:
 
     def unblock_ip(self, ip: str) -> bool:
         """Manually unblock an IP."""
+        try:
+            ip = _validate_ip(ip)
+        except ValueError as e:
+            logger.error(f"Refusing to unblock invalid IP: {e}")
+            return False
         if self.dry_run:
             logger.info(f"[DRY-RUN] Would unblock {ip}")
             return True
@@ -188,6 +239,11 @@ class FirewallManager:
         logger.info("[Firewall] Bridge nftables removed")
 
     def bridge_block_ip(self, ip: str):
+        try:
+            ip = _validate_ip(ip)
+        except ValueError as e:
+            logger.error(f"Refusing to bridge-block invalid IP: {e}")
+            return
         if self.dry_run:
             logger.info(f"[DRY-RUN] Would add bridge drop rule for {ip}")
             return
@@ -199,6 +255,11 @@ class FirewallManager:
         logger.info(f"[Firewall] Bridge block {ip}")
 
     def bridge_unblock_ip(self, ip: str):
+        try:
+            ip = _validate_ip(ip)
+        except ValueError as e:
+            logger.error(f"Refusing to bridge-unblock invalid IP: {e}")
+            return
         if self.dry_run:
             logger.info(f"[DRY-RUN] Would remove bridge drop rule for {ip}")
             return
@@ -272,7 +333,7 @@ class FirewallManager:
                             check=False, capture_output=True, timeout=5
                         )
         except Exception:
-            pass
+            logger.debug(f"[Firewall] Failed to flush NFQUEUE rules for queue {queue_num}")
 
     def local_block_ip(self, ip: str):
         if self.dry_run:
@@ -298,5 +359,5 @@ class FirewallManager:
                     if m:
                         return m.group(1)
         except Exception:
-            pass
+            logger.debug(f"[Firewall] Failed to find bridge rule for {ip}")
         return None

@@ -1,6 +1,7 @@
 import logging
+import math
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from threading import Lock
 from typing import Dict, List, Optional
 
@@ -10,17 +11,22 @@ logger = logging.getLogger(__name__)
 class CovertDetector:
     def __init__(self, config: dict = None):
         self._seq_anomalies: Dict[str, List[int]] = defaultdict(list)
-        self._ttl_anomalies: Dict[str, List[int]] = defaultdict(list)
         self._ack_anomalies: Dict[str, List[int]] = defaultdict(list)
+        self._ttl_anomalies: Dict[str, List[int]] = defaultdict(list)
         self._last_cleanup = time.time()
         self._lock = Lock()
-        thresholds = (config or {}).get("thresholds", {}) if config else {}
+        cfg = config or {}
+        thresholds = cfg.get("thresholds", {})
         self._seq_threshold = thresholds.get("seq_covert_chars", 8)
         self._seq_samples = thresholds.get("seq_covert_samples", 10)
         self._ack_threshold = thresholds.get("ack_covert_chars", 15)
         self._ack_samples = thresholds.get("ack_covert_samples", 10)
         self._ttl_window = thresholds.get("ttl_covert_window", 15)
         self._ttl_variations = thresholds.get("ttl_covert_variations", 6)
+        self._window = cfg.get("adaptive_window", 300)
+        self._seq_baseline: Dict[str, deque] = defaultdict(deque)
+        self._ack_baseline: Dict[str, deque] = defaultdict(deque)
+        self._ttl_baseline: Dict[str, deque] = defaultdict(deque)
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
         with self._lock:
@@ -60,17 +66,55 @@ class CovertDetector:
 
         return detections if detections else None
 
+    def _prune(self, dq, now=None):
+        if now is None:
+            now = time.time()
+        cutoff = now - self._window
+        while dq and dq[0][0] < cutoff:
+            dq.popleft()
+
+    @staticmethod
+    def _welford_stats(seq):
+        n = 0
+        mean = 0.0
+        m2 = 0.0
+        for _, x in seq:
+            n += 1
+            delta = x - mean
+            mean += delta / n
+            m2 += delta * (x - mean)
+        if n < 2:
+            return mean, 0.0
+        variance = m2 / (n - 1)
+        return mean, math.sqrt(variance)
+
+    def _is_adaptive_outlier(self, ip, baseline_map, value, now=None):
+        if now is None:
+            now = time.time()
+        dq = baseline_map[ip]
+        self._prune(dq, now)
+        outlier = False
+        if len(dq) >= 3:
+            mean, std = self._welford_stats(dq)
+            if std == 0:
+                outlier = value != mean
+            else:
+                outlier = abs(value - mean) > 3 * std
+        dq.append((now, value))
+        return outlier
+
     def _check_seq_covert(self, ip, seq):
         last_bytes = seq & 0xFF
         self._seq_anomalies[ip].append(last_bytes)
         recent = self._seq_anomalies[ip][-25:]
+        adaptive_hit = self._is_adaptive_outlier(ip, self._seq_baseline, last_bytes)
         if len(recent) >= self._seq_samples:
             chars = []
             for i in range(len(recent) - 1):
                 diff = (recent[i + 1] - recent[i]) & 0xFF
                 if 32 <= diff <= 126:
                     chars.append(chr(diff))
-            if len(chars) >= self._seq_threshold:
+            if len(chars) >= self._seq_threshold and adaptive_hit:
                 data = "".join(chars[-self._seq_threshold:])
                 distinct = len(set(data))
                 if distinct > max(3, len(data) * 0.7):
@@ -85,13 +129,14 @@ class CovertDetector:
         last_bytes = ack & 0xFF
         self._ack_anomalies[ip].append(last_bytes)
         recent = self._ack_anomalies[ip][-25:]
+        adaptive_hit = self._is_adaptive_outlier(ip, self._ack_baseline, last_bytes)
         if len(recent) >= self._ack_samples:
             chars = []
             for i in range(len(recent) - 1):
                 diff = (recent[i + 1] - recent[i]) & 0xFF
                 if 32 <= diff <= 126:
                     chars.append(chr(diff))
-            if len(chars) >= self._ack_threshold:
+            if len(chars) >= self._ack_threshold and adaptive_hit:
                 data = "".join(chars[-self._ack_threshold:])
                 distinct = len(set(data))
                 if distinct > max(3, len(data) * 0.7):
@@ -103,7 +148,8 @@ class CovertDetector:
     def _check_ttl_covert(self, ip, ttl):
         self._ttl_anomalies[ip].append(ttl)
         recent = self._ttl_anomalies[ip][-self._ttl_window:]
-        if len(recent) >= self._ttl_window and len(set(recent)) >= self._ttl_variations:
+        adaptive_hit = self._is_adaptive_outlier(ip, self._ttl_baseline, ttl)
+        if len(recent) >= self._ttl_window and len(set(recent)) >= self._ttl_variations and adaptive_hit:
             return {"attack_type": "ttl_covert_channel", "severity": "medium", "source_ip": ip,
                     "details": f"TTL manipulation: values {set(recent)} over {len(recent)} pkts"}
         return None
@@ -124,8 +170,8 @@ class CovertDetector:
                         if len(val) > 50 and sum(c.isprintable() for c in val) / len(val) > 0.9:
                             return {"attack_type": "header_covert_channel", "severity": "medium",
                                     "source_ip": "", "details": f"Suspicious header {key}: {val[:80]}"}
-        except Exception:
-            logger.debug("[Covert] Header parse failed")
+        except Exception as e:
+            logger.warning(f"[Covert] Header parse failed: {e}")
         return None
 
     def _cleanup_if_needed(self):
@@ -133,4 +179,11 @@ class CovertDetector:
             self._seq_anomalies.clear()
             self._ack_anomalies.clear()
             self._ttl_anomalies.clear()
+            now = time.time()
+            for dq in self._seq_baseline.values():
+                self._prune(dq, now)
+            for dq in self._ack_baseline.values():
+                self._prune(dq, now)
+            for dq in self._ttl_baseline.values():
+                self._prune(dq, now)
             self._last_cleanup = time.time()

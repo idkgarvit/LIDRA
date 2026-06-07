@@ -1,11 +1,11 @@
-# LIDRA v2 - Production Intrusion Detection System
+# LIDRA - Production Intrusion Detection System
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
 **Lightweight Intrusion Detection and Response with Adaptive Deception**
 
-LIDRA v2 is a production-ready honeypot-based intrusion detection system designed for real-world deployment. It combines active deception with intelligent threat detection and automated response.
+LIDRA is a production-ready honeypot-based intrusion detection system designed for real-world deployment. It combines active deception with intelligent threat detection and automated response.
 
 ## Features
 
@@ -38,8 +38,8 @@ pip install -r requirements.txt
 # Configure (edit with your API keys/webhooks)
 nano config/config.yaml
 
-# Run LIDRA v2
-python src/lidra_agent_v2.py
+# Run LIDRA
+python src/lidra_agent_v3.py
 ```
 
 Dashboard available at `http://localhost:8080`
@@ -120,15 +120,17 @@ LIDRA/
 ├── logs/             # Log files
 ├── src/
 │   ├── alerts/       # Alerting system (Slack, Discord, Email)
-│   ├── core/         # Legacy shell scripts
-│   ├── dashboard/    # Web dashboard (FastAPI)
+│   ├── bridge/       # Inline gateway / NFQUEUE bridge mode
+│   ├── cli/          # `lidra` command-line entry point
+│   ├── core/         # Docker-internal honeypot orchestration
+│   ├── dashboard/    # Text-based CLI dashboard (cli.py)
 │   ├── database/     # SQLite database layer
 │   ├── detection/    # Attack detection engine
-│   ├── helpers/      # Helper scripts
+│   ├── honeypot/     # Honeyfiles + deception assets
 │   ├── intel/        # Threat intelligence
 │   ├── response/     # Firewall/response mechanisms
 │   ├── utils/        # Utility modules
-│   └── lidra_agent_v2.py  # Main orchestrator
+│   └── lidra_agent_v3.py  # Main orchestrator
 ├── state/            # State files
 └── tests/            # Test suite
 ```
@@ -155,7 +157,7 @@ sudo apt install -y iptables inotify-tools curl jq
 mkdir -p data logs state
 
 # Test installation
-python src/lidra_agent_v2.py
+python src/lidra_agent_v3.py
 ```
 
 ### Docker Deployment
@@ -196,7 +198,7 @@ python -c "from database.db import LIDRADatabase; LIDRADatabase('data/lidra.db')
 
 ### Firewall permission denied
 ```bash
-sudo python src/lidra_agent_v2.py
+sudo python src/lidra_agent_v3.py
 ```
 
 ### Dashboard not starting

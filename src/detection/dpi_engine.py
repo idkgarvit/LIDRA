@@ -5,9 +5,11 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from urllib.parse import unquote, unquote_plus, parse_qs
 
+from utils.config_loader import get_cfg
 from detection.fingerprint.tls_fingerprinter import TLSFingerprinter
 from detection.anomaly.smuggling_detector import SmugglingDetector
 from detection.detector.dns_tunnel_detector import DNSTunnelDetector
+from detection.countermeasures.evasion import normalize_unicode
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +163,8 @@ class DPIEngine:
 
     def _parse_http(self, data: bytes) -> Optional[Dict]:
         try:
+            if data[:24] == b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n":
+                return {"method": "PRI", "uri": "*", "headers": {"upgrade": "h2c"}, "body": "", "http2": True}
             text = data.decode("utf-8", errors="replace")
             lines = text.split("\r\n")
             if not lines:
@@ -214,8 +218,8 @@ class DPIEngine:
                         break
                 if qname_parts:
                     return {"query": ".".join(qname_parts)}
-        except Exception:
-            logger.debug("[DPI] DNS parse failed")
+        except Exception as e:
+            logger.warning(f"[DPI] DNS parse failed: {e}")
         return None
 
     def _parse_tls(self, data: bytes) -> Optional[Dict]:
@@ -270,7 +274,7 @@ class DPIEngine:
     def _deep_decode_with_tracking(text: str, max_depth: int = 10):
         current = text
         encodings = set()
-        for _ in range(max_depth):
+        for depth in range(1, max_depth + 1):
             iteration_start = current
             prev = current
             current = unquote_plus(current)
@@ -314,8 +318,10 @@ class DPIEngine:
                         if _has_printable_content(decoded):
                             current = current.replace(cand, decoded, 1)
                             encodings.add("base64")
-            except Exception:
-                logger.debug("[DPI] Base64 decode failed")
+            except Exception as e:
+                logger.warning(f"[DPI] Base64 decode failed: {e}")
+            if depth > 3 and current != text:
+                logger.warning(f"[DPI] Deep decode depth {depth} (>3) for payload: {text[:60]}")
             if current == iteration_start:
                 break
             if len(encodings) >= 5:
@@ -343,8 +349,8 @@ class DPIEngine:
                         decoded = base64.b64decode(cand).decode("utf-8", errors="replace")
                         if _has_printable_content(decoded):
                             current = current.replace(cand, decoded, 1)
-            except Exception:
-                logger.debug("[DPI] Base64 decode failed")
+            except Exception as e:
+                logger.warning(f"[DPI] Base64 decode failed: {e}")
             if current == prev:
                 break
         return current
@@ -522,47 +528,11 @@ class DPIEngine:
         return None
 
 
-_SUSPICIOUS_SNI_PATTERNS = None
-
-
 def _get_suspicious_sni_patterns():
-    global _SUSPICIOUS_SNI_PATTERNS
-    if _SUSPICIOUS_SNI_PATTERNS is not None:
-        return _SUSPICIOUS_SNI_PATTERNS
-    import yaml
-    from pathlib import Path
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    default = [".xyz", ".tk", ".ml", ".ga", ".cf", "malware", "phish", "c2", "botnet",
-               "reverse", "shell", "ransom", "crypt", "exploit"]
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        patterns = cfg.get("suspicious_sni_patterns", [])
-        if patterns:
-            _SUSPICIOUS_SNI_PATTERNS = patterns
-    if _SUSPICIOUS_SNI_PATTERNS is None:
-        _SUSPICIOUS_SNI_PATTERNS = default
-    return _SUSPICIOUS_SNI_PATTERNS
-
-
-_SCANNER_AGENTS = None
+    return get_cfg("suspicious_sni_patterns", [".xyz", ".tk", ".ml", ".ga", ".cf", "malware", "phish", "c2", "botnet",
+                                               "reverse", "shell", "ransom", "crypt", "exploit"])
 
 
 def _get_scanner_agents():
-    global _SCANNER_AGENTS
-    if _SCANNER_AGENTS is not None:
-        return _SCANNER_AGENTS
-    import yaml
-    from pathlib import Path
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    default = ["nikto", "nmap", "sqlmap", "dirbuster", "gobuster",
-               "wpscan", "nuclei", "masscan", "zgrab", "burp", "acunetix"]
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        agents = cfg.get("scanner_agents", [])
-        if agents:
-            _SCANNER_AGENTS = agents
-    if _SCANNER_AGENTS is None:
-        _SCANNER_AGENTS = default
-    return _SCANNER_AGENTS
+    return get_cfg("scanner_agents", ["nikto", "nmap", "sqlmap", "dirbuster", "gobuster",
+                                      "wpscan", "nuclei", "masscan", "zgrab", "burp", "acunetix"])

@@ -111,8 +111,8 @@ class ProxyDetector:
                                 "details": f"Proxy headers: {key} in request",
                             })
                             break
-        except Exception:
-            logger.debug("[ProxyDetector] Header parse failed")
+        except Exception as e:
+            logger.warning(f"[ProxyDetector] Header parse failed: {e}")
 
     def _cleanup_if_needed(self):
         if time.time() - self._last_cleanup > 60:

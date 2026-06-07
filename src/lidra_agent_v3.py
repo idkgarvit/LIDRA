@@ -13,16 +13,16 @@ Lightweight, enterprise-grade intrusion detection using:
 import os
 import sys
 import time
+import signal
 import logging
 import threading
 import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
-import json
 
 import psutil
-import yaml
+from utils.config_loader import get_cfg, load_config as load_central_config
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -41,7 +41,7 @@ from detection.mitre import MITREMapper
 from detection.ml.anomaly import AnomalyDetector
 from detection.explainer import AttackExplainer
 from ebpf import EBPFTracer, EBPFDetector, create_tracer
-from dashboard.cli import create_cli_dashboard
+
 from collectors.network import create_sniffer
 from collectors.syslog import create_syslog_server
 from utils.interface import detect_interface
@@ -59,10 +59,9 @@ except ImportError:
     TUIIPCServer = None
     HAS_BRIDGE = False
 
-try:
-    from dashboard.main import collector_state
-except ImportError:
-    collector_state = None
+if os.geteuid() != 0:
+    print("LIDRA requires root privileges. Re-run with sudo.")
+    sys.exit(1)
 
 LOG_DIR = Path(__file__).parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -78,16 +77,15 @@ logging.basicConfig(
 logger = logging.getLogger("LIDRA-v3")
 
 BASE = Path(__file__).parent.parent
-CFG = BASE / "config" / "config.yaml"
 
 
-def load_config() -> dict:
-    """Load configuration."""
-    if not CFG.exists():
-        logger.warning(f"Config not found: {CFG}, using defaults")
-        return {}
-    with open(CFG) as f:
-        return yaml.safe_load(f)
+def _config_dry_run(config: dict) -> bool:
+    """Single source of truth for the response.dry_run config value.
+
+    All FirewallManager constructors and action gates read this so the
+    config and the firewall can never disagree.
+    """
+    return bool(config.get('response', {}).get('dry_run', True))
 
 
 class LIDRAv3:
@@ -100,12 +98,17 @@ class LIDRAv3:
         self.running = False
         self.mode = config.get('mode', 'inline')
 
+        if config.get('general', {}).get('verbose', False):
+            logging.getLogger().setLevel(logging.DEBUG)
+            logger.debug("[Config] Verbose logging enabled")
+
         mode_label = {
             "inline": "INLINE BRIDGE",
             "local": "LOCAL (same-machine)",
         }.get(self.mode, "eBPF-Powered")
         logger.info("=" * 60)
         logger.info(f"LIDRA v3 - {mode_label} Detection System")
+        logger.info(f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
         logger.info("=" * 60)
 
         self.inline_engine = None
@@ -140,7 +143,7 @@ class LIDRAv3:
             self.detector = EBPFDetector()
         else:
             logger.info("[eBPF] FALLBACK: Using log-based detection")
-            self.detector = AttackDetector(str(CFG))
+            self.detector = AttackDetector()
 
         self.tracer.register_callback(self._on_security_event)
 
@@ -158,11 +161,23 @@ class LIDRAv3:
 
         self.firewall = FirewallManager(
             backend=self.config.get('response', {}).get('firewall', 'iptables'),
-            dry_run=self.config.get('response', {}).get('dry_run', True)
+            dry_run=_config_dry_run(self.config)
         )
         logger.info(f"[Firewall] dry_run={self.firewall.dry_run}")
 
-        self.dashboard_thread = None
+    @property
+    def is_dry_run(self) -> bool:
+        """Single source of truth for response-dry-run checks.
+
+        Reads from the firewall instance when available; falls back to the
+        config helper so the agent and firewall can never disagree.
+        """
+        fw = getattr(self, "firewall", None)
+        if fw is not None:
+            return bool(fw.dry_run)
+        return _config_dry_run(self.config)
+
+        from dashboard.cli import create_cli_dashboard
         self.cli_dashboard = create_cli_dashboard(self.db)
         self.cli_dashboard.print_welcome()
         logger.info("[CLI] Terminal dashboard ready")
@@ -184,7 +199,7 @@ class LIDRAv3:
         logger.info("BRIDGE MODE — Inline Transparent Gateway")
         logger.info("=" * 60)
 
-        self.detector = AttackDetector(str(CFG))
+        self.detector = AttackDetector()
         self.mitre_mapper = MITREMapper()
         logger.info("[MITRE] ATT&CK framework loaded")
 
@@ -196,10 +211,16 @@ class LIDRAv3:
         self.notifier = self._init_alerting()
 
         self.firewall = FirewallManager(
-            backend=self.config.get('response', {},).get('firewall', 'nftables'),
-            dry_run=self.config.get('response', {}).get('dry_run', True)
+            backend=self.config.get('response', {}).get('firewall', 'nftables'),
+            dry_run=_config_dry_run(self.config)
         )
         logger.info(f"[Firewall] dry_run={self.firewall.dry_run}")
+
+        self.inline_engine = None
+        self.bridge_manager = None
+        self.tui_data_provider = None
+        self._tui_ipc_server = None
+        self._tui_process = None
 
         if HAS_BRIDGE:
             self.inline_engine = InlineEngine(
@@ -217,14 +238,11 @@ class LIDRAv3:
                 bridge_manager=self.bridge_manager,
                 db=self.db
             )
-            self._tui_ipc_server = None
             logger.info("[Bridge] Inline engine + TUI data provider ready")
         else:
             logger.warning("[Bridge] Bridge modules not available — install dependencies")
-            self.inline_engine = None
-            self.bridge_manager = None
 
-        self.dashboard_thread = None
+        from dashboard.cli import create_cli_dashboard
         self.cli_dashboard = create_cli_dashboard(self.db)
         self.cli_dashboard.print_welcome()
         logger.info("[Bridge] Initialization complete")
@@ -234,16 +252,29 @@ class LIDRAv3:
         logger.info("LOCAL MODE — Same-Machine Inline Detection")
         logger.info("=" * 60)
 
-        self.detector = AttackDetector(str(CFG))
+        # Detect WiFi interface (NFQUEUE would break WiFi)
+        iface = detect_interface()
+        if iface and os.path.exists(f"/sys/class/net/{iface}/wireless"):
+            logger.warning(f"[WiFi] Interface {iface} is wireless — using AF_PACKET (NFQUEUE skipped)")
+
+        self.detector = AttackDetector()
         self.mitre_mapper = MITREMapper()
         self.anomaly_detector = AnomalyDetector()
         self.explainer = AttackExplainer()
         self.threat_intel = self._init_threat_intel()
         self.notifier = self._init_alerting()
 
+        self.tracer = create_tracer(self.config)
+        loaded = self.tracer.load()
+        if self.tracer.is_using_ebpf():
+            logger.info("[eBPF] Kernel-level telemetry ACTIVE (local mode)")
+        else:
+            logger.info("[eBPF] FALLBACK: Log-based detection ACTIVE in local mode")
+        self.tracer.register_callback(self._on_security_event)
+
         self.firewall = FirewallManager(
             backend='iptables',
-            dry_run=self.config.get('response', {}).get('dry_run', True)
+            dry_run=_config_dry_run(self.config)
         )
         logger.info(f"[Firewall] dry_run={self.firewall.dry_run}")
 
@@ -266,7 +297,7 @@ class LIDRAv3:
             logger.warning("[Local] Bridge modules not available — install dependencies")
             self.inline_engine = None
 
-        self.dashboard_thread = None
+        from dashboard.cli import create_cli_dashboard
         self.cli_dashboard = create_cli_dashboard(self.db)
         self.cli_dashboard.print_welcome()
         logger.info("[Local] Initialization complete")
@@ -337,7 +368,7 @@ class LIDRAv3:
                     self.notifier.notify(alert)
                     self.db.add_alert(attack_type, severity, source_ip, detection.get('details', '')[:500])
 
-                    if not self.config.get('response', {}).get('dry_run', True):
+                    if not self.is_dry_run:
                         self.firewall.block_ip(source_ip, f"network_{attack_type}")
                         logger.info(f"[BLOCKED] {source_ip} via network detection")
 
@@ -359,7 +390,9 @@ class LIDRAv3:
         
         return ThreatIntelOrchestrator(
             providers,
-            check_on_detect=self.config.get('threat_intel', {}).get('check_on_detect', True)
+            check_on_detect=self.config.get('threat_intel', {}).get('check_on_detect', True),
+            cache_ttl_seconds=self.config.get('threat_intel', {}).get('cache_ttl_seconds', 3600),
+            max_cache=self.config.get('threat_intel', {}).get('max_cache', 10000),
         )
     
     def _init_alerting(self) -> AlertNotifier:
@@ -398,6 +431,12 @@ class LIDRAv3:
                 logger.debug(f"[WL] Skipping detection from whitelisted IP {source_ip}")
                 return
 
+            from utils.allowlist import should_suppress
+            suppress, reason = should_suppress(source_ip, attack_type, self.config)
+            if suppress:
+                logger.debug(f"[ALLOWLIST] Skipping {attack_type} from {source_ip} ({reason})")
+                return
+
             detected = self.detector.analyze_packet_event(detection)
             if not detected:
                 return
@@ -428,7 +467,7 @@ class LIDRAv3:
                     self.notifier.notify(alert)
                     self.db.add_alert(attack_type, severity, source_ip, details[:500])
 
-                    if not self.config.get('response', {}).get('dry_run', True):
+                    if not self.is_dry_run:
                         self.firewall.bridge_block_ip(source_ip)
                         logger.info(f"[INLINE] Dropped & blocked {source_ip} — {attack_type}")
                         self._push_tui_event({
@@ -459,8 +498,18 @@ class LIDRAv3:
     def _on_security_event(self, event):
         """Handle security events from eBPF/logs."""
         try:
-            # Analyze event for attacks
-            detection = self.detector.analyze_event(event)
+            detection = None
+            
+            pre = (event.raw_data or {}).get('attack') if hasattr(event, 'raw_data') else None
+            if pre:
+                detection = {
+                    'attack_type': pre.get('attack_type', 'unknown'),
+                    'severity': pre.get('severity', 'medium'),
+                    'mitre': pre.get('mitre', []),
+                    'details': pre.get('details', {}),
+                }
+            else:
+                detection = self.detector.analyze_event(event)
             
             if not detection:
                 return
@@ -468,9 +517,14 @@ class LIDRAv3:
             attack_type = detection.get('attack_type', 'unknown')
             severity = detection.get('severity', 'medium')
             mitre = detection.get('mitre', [])
-            
-            # Get source IP
+
             ip_address = getattr(event, 'dst_ip', '') or getattr(event, 'ip_address', '') or 'unknown'
+
+            from utils.allowlist import should_suppress
+            suppress, reason = should_suppress(ip_address, attack_type, self.config)
+            if suppress:
+                logger.debug(f"[ALLOWLIST] Skipping log-based {attack_type} from {ip_address} ({reason})")
+                return
             
             # Enrich with threat intel
             intel = self.threat_intel.lookup_ip(ip_address)
@@ -518,8 +572,8 @@ class LIDRAv3:
                 logger.warning(f"[ALERT] {attack_type} from {ip_address} - {severity}")
             
             # Auto-block if critical and configured
-            if (severity == 'critical' and 
-                not self.config.get('response', {}).get('dry_run', True)):
+            if (severity == 'critical' and
+                not self.is_dry_run):
                 
                 if intel.get('is_malicious') or intel.get('threat_score', 0) >= 70:
                     self.firewall.block_ip(
@@ -533,22 +587,6 @@ class LIDRAv3:
             
         except Exception as e:
             logger.error(f"Event processing error: {e}")
-    
-    def start_dashboard(self):
-        """Start web dashboard."""
-        try:
-            from dashboard.main import app
-            import uvicorn
-            dash_port = self.config.get("dashboard", {}).get("port", 9090)
-            
-            def run_dashboard():
-                uvicorn.run(app, host="0.0.0.0", port=dash_port, log_level="warning")
-            
-            self.dashboard_thread = threading.Thread(target=run_dashboard, daemon=True)
-            self.dashboard_thread.start()
-            logger.info(f"[Dashboard] http://0.0.0.0:{dash_port}")
-        except Exception as e:
-            logger.warning(f"Dashboard not started: {e}")
     
     def run(self):
         """Main run loop."""
@@ -570,13 +608,12 @@ class LIDRAv3:
         if self.syslog_server:
             self.syslog_server.start()
 
-        sleep_time = 60 if self.config.get('mode') == 'development' else 300
+        sleep_time = self.config.get('main_loop', {}).get('cycle_seconds', 60)
 
         logger.info(f"[Config] Mode: {self.config.get('mode', 'production')}")
         logger.info(f"[Config] Detection: {'eBPF' if self.tracer.is_using_ebpf() else 'Log-based'}")
         logger.info(f"[Config] Cycle: {sleep_time}s")
 
-        self.start_dashboard()
         self.cli_dashboard.start()
 
         try:
@@ -593,16 +630,9 @@ class LIDRAv3:
                 # ML baseline learning (occasional)
                 self._learn_baselines()
 
-                # Push collector stats to dashboard
-                if collector_state is not None:
-                    collector_state.update({
-                        "network": self.sniffer.get_stats() if self.sniffer else {"packets_captured": 0},
-                        "syslog": self.syslog_server.get_stats() if self.syslog_server else {"messages_received": 0}
-                    })
-                
                 logger.debug(f"[Cycle] Complete, sleeping {sleep_time}s")
                 time.sleep(sleep_time)
-                
+
         except KeyboardInterrupt:
             logger.info("LIDRA v3 stopped by user")
         finally:
@@ -637,7 +667,6 @@ class LIDRAv3:
             self.running = False
             return
 
-        self.start_dashboard()
 
         # Start IPC server so TUI subprocess gets live data
         self._tui_ipc_server = None
@@ -751,7 +780,10 @@ class LIDRAv3:
             self.running = False
             return
 
-        self.start_dashboard()
+        if self.tracer:
+            self.tracer.start()
+            logger.info("[Tracer] Log file monitoring started")
+
 
         # Start IPC server so TUI subprocess gets live data
         self._tui_ipc_server = None
@@ -865,8 +897,8 @@ class LIDRAv3:
                     for line in f:
                         if line.startswith("honeyfile:"):
                             last_processed = int(line.split(":")[1])
-            except:
-                pass
+            except (OSError, ValueError, IOError):
+                logger.debug("[Agent] No previous honeypot state file")
 
         conn = self.db._get_connection()
         cursor = conn.cursor()
@@ -917,7 +949,7 @@ class LIDRAv3:
         self.notifier.notify(alert)
         self.db.add_alert(attack_type, "critical", ip, f"Honeypot/Honeyfile detection from {ip}")
 
-        if not self.config.get('response', {}).get('dry_run', True):
+        if not self.is_dry_run:
             self.firewall.block_ip(ip, f"honeypot_{attack_type}")
 
         logger.warning(f"[HONEYPOT] {attack_type} from {ip} - auto-blocked")
@@ -930,6 +962,9 @@ class LIDRAv3:
             if self.inline_engine:
                 self.inline_engine.stop()
                 logger.info("[InlineEngine] Stopped")
+            if self.tracer:
+                self.tracer.stop()
+                logger.info("[Tracer] Stopped")
             if self.bridge_manager:
                 self.bridge_manager.teardown()
                 logger.info("[Bridge] Torn down")
@@ -967,13 +1002,44 @@ class LIDRAv3:
 
 
 def main():
-    """Entry point."""
+    """Entry point with signal handling and PID file."""
     (BASE / "data").mkdir(exist_ok=True)
     (BASE / "logs").mkdir(exist_ok=True)
     (BASE / "state").mkdir(exist_ok=True)
-    
-    config = load_config()
+
+    import socket as _socket
+    pid_path = None
+    for candidate in (Path("/var/run/lidra/lidra.pid"), Path("/run/lidra/lidra.pid")):
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            candidate.write_text(str(os.getpid()))
+            try:
+                os.chmod(candidate, 0o644)
+            except OSError:
+                pass
+            pid_path = candidate
+            break
+        except (PermissionError, OSError) as e:
+            logger.debug(f"PID file {candidate} unavailable: {e}")
+    if pid_path is None:
+        pid_path = BASE / "state" / "lidra.pid"
+        try:
+            pid_path.write_text(str(os.getpid()))
+        except OSError as e:
+            logger.warning(f"Could not write PID file: {e}")
+
+    config = load_central_config()
     lidra = LIDRAv3(config)
+
+    def _shutdown(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down...")
+        lidra.stop()
+        if pid_path.exists():
+            pid_path.unlink()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGHUP, _shutdown)
     lidra.run()
 
 

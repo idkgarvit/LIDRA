@@ -84,8 +84,8 @@ class TunnelDetector:
                 if ll.startswith("content-type:") and "application/octet-stream" in ll:
                     return {"attack_type": "http_tunnel", "severity": "high", "source_ip": ip,
                             "details": "Binary content-type in HTTP (possible tunnel)"}
-        except Exception:
-            logger.debug("[TunnelDetector] HTTP tunnel parse failed")
+        except Exception as e:
+            logger.warning(f"[TunnelDetector] HTTP tunnel parse failed: {e}")
         return None
 
     def _cleanup_if_needed(self):
