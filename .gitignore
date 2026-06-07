@@ -1,0 +1,44 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Build / dist
+build/
+dist/
+*.tar.gz
+*.zip
+*.whl
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.cover
+.cache
+
+# Venv
+venv/
+.venv/
+env/
+ENV/
+
+# Local secrets
+.env
+*.local.yaml
+
+# Runtime state (active DB / logs are kept; WAL is transient)
+data/*.db-shm
+data/*.db-wal
+*.pid
