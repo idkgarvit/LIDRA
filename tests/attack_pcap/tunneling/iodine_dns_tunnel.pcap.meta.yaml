@@ -1,0 +1,17 @@
+name: iodine DNS tunnel
+source: https://github.com/leshark/Simple-DNS-tunneling-detector
+description: iodine DNS tunneling tool capturing long TXT/encoded DNS queries
+attack_category: tunneling
+mitre: T1071.004
+severity: high
+expected_attack_types:
+  - dns_tunnel
+  - tunneling
+expected_min_confidence: 0.6
+expected_min_packets_with_detection: 50
+expected_source_ips:
+  - contains: "127.0.0.1"
+notes: |
+  41K packets of iodine DNS traffic. Lab capture. Some pcap libraries
+  may need a converter if linktype is non-Ethernet. We use dpkt which
+  handles all common linktypes.

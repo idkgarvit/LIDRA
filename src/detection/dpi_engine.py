@@ -174,7 +174,7 @@ class DPIEngine:
             if len(parts) < 3:
                 return None
             method = parts[0]
-            uri = parts[1]
+            uri = " ".join(parts[1:-1]) if len(parts) > 3 else parts[1]
             headers = {}
             body = ""
             in_body = False
@@ -264,7 +264,9 @@ class DPIEngine:
         suspicious = _get_suspicious_sni_patterns()
         return any(s in sni.lower() for s in suspicious)
 
-    def _decode(self, text: str) -> str:
+    def _decode(self, text) -> str:
+        if not text:
+            return ""
         decoded, encodings = self._deep_decode_with_tracking(text)
         if len(encodings) >= 3:
             logger.warning(f"[DPI] Mixed encoding ({len(encodings)} types: {encodings}) in payload: {text[:80]}")
@@ -392,7 +394,7 @@ class DPIEngine:
         if r:
             return r
         chunked = self._detect_chunked_encoding(body)
-        if chunked != body:
+        if chunked and chunked != body:
             for part in self._detect_multipart(parsed.get("headers", {}), chunked):
                 decoded = self._decode(part)
                 if self._detect_sqli(decoded) or self._detect_xss(decoded) or self._detect_cmd_injection(decoded):

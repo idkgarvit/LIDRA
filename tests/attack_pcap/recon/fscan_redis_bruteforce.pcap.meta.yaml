@@ -1,0 +1,14 @@
+name: fscan Redis brute force
+source: https://github.com/safest-place/ExploitPcapCollection
+description: fscan tool brute-forcing Redis credentials
+attack_category: bruteforce
+mitre: T1110
+severity: high
+expected_attack_types:
+  - port
+  - syn
+expected_min_confidence: 0.5
+expected_min_packets_with_detection: 50
+notes: |
+  Same as fscan_mysql — LIDRA sees the port_scan pattern (112x) but
+  lacks a specific bruteforce signature. Tracked in COVERAGE.md.

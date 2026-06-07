@@ -1,0 +1,14 @@
+name: Minimal SQLi test pcap (`OR '1'='1`)
+source: https://github.com/Muhammad-Hasnain12/Network-Packet-Analysis-and-SQL-Injection-Detection
+description: Loopback pcap with classic boolean SQLi payload
+attack_category: sqli
+mitre: T1190
+severity: high
+expected_attack_types:
+  - sqli
+expected_min_confidence: 0.7
+expected_min_packets_with_detection: 1
+notes: |
+  Just 1 packet, 99 bytes payload: GET /search?query=' OR '1'='1
+  Loopback (127.0.0.1). Linktype 228 (raw IPv4) — handled by
+  the harness automatically.

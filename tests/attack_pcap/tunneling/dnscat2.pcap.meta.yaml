@@ -1,0 +1,11 @@
+name: dnscat2 (labeled as iodine in source)
+source: https://github.com/elastic/examples
+description: Small DNS tunneling capture (438 packets) used by Elastic security analytics
+attack_category: tunneling
+mitre: T1071.004
+severity: high
+expected_attack_types:
+  - dns_tunnel
+  - tunneling
+expected_min_confidence: 0.6
+expected_min_packets_with_detection: 5

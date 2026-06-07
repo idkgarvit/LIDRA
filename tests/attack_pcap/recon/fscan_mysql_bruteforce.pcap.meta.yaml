@@ -1,0 +1,17 @@
+name: fscan MySQL brute force
+source: https://github.com/safest-place/ExploitPcapCollection
+description: fscan tool brute-forcing MySQL credentials
+attack_category: bruteforce
+mitre: T1110
+severity: high
+expected_attack_types:
+  - port
+  - syn
+  - scan
+expected_min_confidence: 0.5
+expected_min_packets_with_detection: 100
+notes: |
+  LIDRA detects this as port_scan (2884x) + syn_burst + short_connection
+  but does NOT have a specific 'bruteforce' or 'auth_attack' signature.
+  The behavioral_analyzer should pick this up but currently doesn't
+  for MySQL handshake patterns. Tracked in COVERAGE.md.

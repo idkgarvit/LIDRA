@@ -1,0 +1,14 @@
+name: SYN flood DoS
+source: generated locally with scapy
+description: 5,000 SYNs from one source to port 80 on a single target
+attack_category: dos
+mitre: T1498.001
+severity: high
+expected_attack_types:
+  - dos
+  - syn_flood
+  - flood
+expected_min_confidence: 0.5
+expected_min_packets_with_detection: 500
+expected_source_ips:
+  - "10.99.99.99"

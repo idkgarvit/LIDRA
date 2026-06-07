@@ -1,0 +1,10 @@
+name: SQLi test pcap (extended)
+source: https://github.com/Muhammad-Hasnain12/Network-Packet-Analysis-and-SQL-Injection-Detection
+description: Loopback pcap with stacked SQLi payload
+attack_category: sqli
+mitre: T1190
+severity: high
+expected_attack_types:
+  - sqli
+expected_min_confidence: 0.7
+expected_min_packets_with_detection: 1

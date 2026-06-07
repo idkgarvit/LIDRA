@@ -1,0 +1,17 @@
+name: Nmap SYN port scan
+source: generated locally with scapy
+description: 2,687 SYN packets to 30 hosts × 90 ports = full port scan
+attack_category: recon
+mitre: T1046
+severity: medium
+expected_attack_types:
+  - port_scan
+  - scan
+expected_min_confidence: 0.5
+expected_min_packets_with_detection: 100
+expected_source_ips:
+  - "10.99.99.99"
+notes: |
+  Generated with scapy (not actual nmap) but the signature is identical
+  to real nmap -sS: many SYNs from one IP to many target:port pairs.
+  This is the most reliable test for the port_analyzer.

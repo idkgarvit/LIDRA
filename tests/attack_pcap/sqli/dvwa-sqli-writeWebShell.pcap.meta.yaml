@@ -1,0 +1,11 @@
+name: DVWA SQLi to write web shell
+source: https://github.com/safest-place/ExploitPcapCollection (TA0001-Initial_Access/web)
+description: SQL injection against DVWA to write a web shell
+attack_category: sqli
+mitre: T1190
+severity: critical
+expected_attack_types:
+  - sqli
+  - web_attack
+expected_min_confidence: 0.7
+expected_min_packets_with_detection: 1
