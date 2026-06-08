@@ -1,17 +1,10 @@
 from enum import Enum
-from pathlib import Path
 from typing import Dict, List, Optional
-import yaml
+from utils.config_loader import get_cfg
 
 
 def _get_threshold(key, default):
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    try:
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        return int(cfg.get("thresholds", {}).get(key, default))
-    except Exception:
-        return default
+    return get_cfg(f"thresholds.{key}", default)
 
 
 class Verdict(Enum):

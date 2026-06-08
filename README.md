@@ -2,6 +2,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![CI](https://github.com/idkgarvit/LIDRA/actions/workflows/ci.yml/badge.svg)](https://github.com/idkgarvit/LIDRA/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker)](https://github.com/idkgarvit/LIDRA/pkgs/container/lidra)
+[![Prometheus](https://img.shields.io/badge/metrics-prometheus-E6522C?logo=prometheus)](config/prometheus.yml)
 
 **Lightweight Intrusion Detection and Response with Adaptive Deception**
 
@@ -43,6 +46,32 @@ python src/lidra_agent_v3.py
 ```
 
 Dashboard: TUI mode (run with `--tui`).
+
+## Configuration & Secrets
+
+Set these via environment variables or `config/config.yaml`:
+
+| Variable | Config Path | Required | Purpose |
+|----------|-------------|----------|---------|
+| `LIDRA_ABUSEIPDB_KEY` | `threat_intel.abuseipdb_api_key` | No | IP reputation lookups |
+| `LIDRA_VT_KEY` | `threat_intel.virustotal_api_key` | No | VirusTotal enrichment |
+| `LIDRA_SMTP_PASSWORD` | `alerts.email.password` | No | SMTP password for email alerts |
+| `SLACK_WEBHOOK` | `alerts.slack_webhook` | No | Slack alert notifications (in YAML config) |
+| `DISCORD_WEBHOOK` | `alerts.discord_webhook` | No | Discord alert notifications (in YAML config) |
+| `LIDRA_METRICS_PORT` | — | No | Prometheus metrics port (default: 8080) |
+| `LIDRA_METRICS_CERT` | — | No | TLS cert path for metrics endpoint |
+| `LIDRA_METRICS_KEY` | — | No | TLS key path for metrics endpoint |
+| `LIDRA_DRY_RUN` | `response.dry_run` | No | Dry-run mode (`1` = no actual blocking) |
+| `LIDRA_LOG_LEVEL` | `general.verbose` | No | Set `DEBUG` for verbose logging |
+
+> **Security:**
+> - Never commit API keys or webhooks to version control. Use environment variables or `.env` in production.
+> - The metrics endpoint (`:8080`) listens on all interfaces. In production, either:
+>   - Set `LIDRA_METRICS_CERT` + `LIDRA_METRICS_KEY` for TLS, **or**
+>   - Bind to localhost only (add `--bind 127.0.0.1`), **or**
+>   - Use a reverse proxy (nginx) in front of the agent.
+> - Agent ↔ TUI IPC uses a Unix socket (`/tmp/lidra_tui.sock`) — local-only, no TLS needed.
+> - Docker Compose inter-container traffic is on an isolated bridge network.
 
 ## Demo (60 seconds)
 
@@ -200,6 +229,33 @@ done
 # Check dashboard for new attacker
 curl http://localhost:8080/api/stats
 ```
+
+## Deployment
+
+### Docker (single service)
+```bash
+docker build -t lidra:latest .
+docker run --rm --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SYS_ADMIN \
+  -p 8080:8080 lidra:latest
+```
+
+### Docker Compose (full stack with monitoring)
+```bash
+docker compose up -d
+# Agent metrics:  http://localhost:8080/metrics
+# Prometheus:     http://localhost:9090
+# Grafana:        http://localhost:3000 (admin/admin)
+# Vuln server:    http://localhost:8081
+```
+
+### Hot-Reload
+Config is reloaded on `SIGHUP` without restart:
+```bash
+kill -HUP $(cat /var/run/lidra/lidra.pid 2>/dev/null || cat state/lidra.pid)
+```
+
+### CI/CD
+Every push runs lint, tests across Python 3.11–3.13, config validation, and a Docker build check via GitHub Actions.
 
 ## Troubleshooting
 

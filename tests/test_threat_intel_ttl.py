@@ -154,19 +154,19 @@ class TestDockerfileHealthcheck:
     """Sanity check that the Dockerfile no longer references dead endpoints."""
 
     def test_dockerfile_does_not_reference_api_stats(self):
-        path = os.path.join(os.path.dirname(__file__), "..", "docker", "Dockerfile")
+        path = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
         with open(path) as f:
             content = f.read()
         assert "/api/stats" not in content, "healthcheck still references removed web dashboard"
 
     def test_dockerfile_uses_sqlite_healthcheck(self):
-        path = os.path.join(os.path.dirname(__file__), "..", "docker", "Dockerfile")
+        path = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
         with open(path) as f:
             content = f.read()
         assert "sqlite3" in content
 
     def test_dockerfile_does_not_switch_to_lidra_user(self):
-        path = os.path.join(os.path.dirname(__file__), "..", "docker", "Dockerfile")
+        path = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
         with open(path) as f:
             content = f.read()
         assert "USER lidra" not in content, "misleading non-root user line must be removed"

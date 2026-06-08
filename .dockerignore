@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+.git
+.gitignore
+*.md
+logs/
+state/
+data/
+bench/
+.anchored_summary.md
+MASTER_PLAN.md
+notebooks/

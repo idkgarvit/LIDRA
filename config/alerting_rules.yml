@@ -1,0 +1,76 @@
+# LIDRA Prometheus Alerting Rules
+groups:
+  - name: lidra
+    interval: 30s
+    rules:
+      - alert: AttackSurge
+        expr: rate(lidra_attacks_total[5m]) > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High attack rate ({{ $value }}/sec)"
+          description: "Attack rate exceeded 100/sec for >2m — possible massive scan or DDoS"
+
+      - alert: CriticalAttack
+        expr: rate(lidra_attacks_total{severity="critical"}[5m]) > 10
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical attacks detected ({{ $value }}/sec)"
+          description: "More than 10 critical severity attacks/min — immediate investigation required"
+
+      - alert: BlockRateHigh
+        expr: rate(lidra_blocks_total[5m]) > 20
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High block rate ({{ $value }}/sec)"
+          description: "Firewall is blocking {{ $value }} IPs/sec — possible sweeping attack"
+
+      - alert: AgentDown
+        expr: up{job="lidra-agent"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LIDRA agent is down"
+          description: "Agent has been unreachable for >1m — check logs & restart"
+
+      - alert: HighCPU
+        expr: lidra_cpu_percent > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent CPU >80%"
+          description: "CPU usage at {{ $value }}% for >5m — possible resource exhaustion"
+
+      - alert: HighMemory
+        expr: lidra_memory_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent memory >85%"
+          description: "Memory usage at {{ $value }}% for >5m"
+
+      - alert: ConnectionSpike
+        expr: lidra_active_connections > 50000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Connection spike (>50k)"
+          description: "Active connections exceeded 50k — possible connection flood"
+
+      - alert: DetectionLatencyHigh
+        expr: histogram_quantile(0.95, rate(lidra_detection_latency_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Detection latency p95 >500ms"
+          description: "95th percentile detection latency is {{ $value }}s — pipeline may be saturated"

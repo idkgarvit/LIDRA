@@ -53,7 +53,7 @@ class CLIDashboard:
             memory = psutil.virtual_memory()
             network = psutil.net_io_counters()
             disk = psutil.disk_usage('/')
-        except:
+        except Exception:
             cpu = memory = network = disk = None
 
         conn = self.db._get_connection()
@@ -114,7 +114,7 @@ class CLIDashboard:
                 "tactics": mitre_report.get("total_tactics", 0),
                 "coverage": mitre_report.get("coverage_percentage", 0),
             }
-        except:
+        except Exception:
             mitre_data = {"techniques": 0, "tactics": 0, "coverage": 0}
 
         return {
@@ -271,7 +271,7 @@ class CLIDashboard:
                     renderable = self._render()
                     live.update(renderable)
                 except Exception as e:
-                    pass
+                    logger.debug(f"[Dashboard] Live update error: {e}")
                 time.sleep(0.5)
 
     def print_welcome(self):

@@ -18,7 +18,7 @@ class LIDRADatabase:
         self._init_schema()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get thread-local database connection."""
+        """Get thread-local database connection with WAL mode."""
         if not hasattr(self._local, 'connection'):
             self._local.connection = sqlite3.connect(
                 str(self.db_path),
@@ -26,7 +26,11 @@ class LIDRADatabase:
                 isolation_level=None
             )
             self._local.connection.row_factory = sqlite3.Row
-            self._local.connection.execute("PRAGMA foreign_keys = ON")
+            c = self._local.connection
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA foreign_keys = ON")
+            c.execute("PRAGMA busy_timeout = 5000")
+            c.execute("PRAGMA auto_vacuum=INCREMENTAL")
         return self._local.connection
 
     @contextmanager
@@ -42,6 +46,7 @@ class LIDRADatabase:
 
     def _init_schema(self):
         """Initialize database schema from SQL file."""
+        import sqlite3 as _sqlite3
         schema_file = Path(__file__).parent / "schema.sql"
         if schema_file.exists():
             with open(schema_file, 'r') as f:
@@ -49,11 +54,11 @@ class LIDRADatabase:
             conn = self._get_connection()
             try:
                 conn.executescript(schema_sql)
-            except sqlite3.OperationalError as e:
-                if "already exists" in str(e):
-                    pass  # Database already initialized
-                else:
-                    raise
+            except _sqlite3.OperationalError as e:
+                err = str(e).lower()
+                if "already exists" in err or "duplicate" in err:
+                    return
+                raise
 
     def add_attacker(self, ip: str, country: str = None, org: str = None) -> int:
         """Add or update attacker record. Returns attacker_id."""
@@ -250,6 +255,7 @@ class LIDRADatabase:
             "DELETE FROM alerts WHERE created_at < datetime('now', ?)",
             (f'-{days} days',)
         )
+        conn.execute("PRAGMA incremental_vacuum(10)")
 
     def close(self):
         """Close database connection."""

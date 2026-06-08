@@ -132,14 +132,23 @@ class DPIEngine:
                         mitre=["T1572"],
                     )
             fp = self._tls_fingerprinter.analyze(stream_data)
-            if fp and fp.get("attack_type") == "malicious_tls_fingerprint":
-                return DPIResult(
-                    attack_type=fp["attack_type"],
-                    severity=fp["severity"],
-                    details=fp["details"],
-                    confidence=fp["confidence"],
-                    mitre=["T1572"],
-                )
+            if fp:
+                if fp.get("attack_type") == "malicious_tls_fingerprint":
+                    return DPIResult(
+                        attack_type=fp["attack_type"],
+                        severity=fp["severity"],
+                        details=fp["details"],
+                        confidence=fp.get("confidence", 0.9),
+                        mitre=fp.get("mitre", ["T1572"]),
+                    )
+                if fp.get("attack_type") == "tls_fingerprint":
+                    return DPIResult(
+                        attack_type="tls_fingerprint",
+                        severity="info",
+                        details=f"JA4={fp['ja4']} SNI={fp.get('sni', 'N/A')}",
+                        confidence=0.1,
+                        mitre=["T1572"],
+                    )
         if b"SSH-" in stream_data[:64]:
             return DPIResult(
                 attack_type="ssh_detected",

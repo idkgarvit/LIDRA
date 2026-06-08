@@ -15,6 +15,7 @@ import threading
 import logging
 import re
 import os
+import time
 from datetime import datetime
 from typing import Optional, Callable, Dict, List
 from dataclasses import dataclass, field
@@ -70,16 +71,19 @@ class SyslogServer:
     Listens on UDP port 514 by default.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 514, callback: Optional[Callable] = None, config: dict = None):
-        self.host = host
-        self.port = port
+    def __init__(self, host: str = "127.0.0.1", port: int = 514, callback: Optional[Callable] = None, config: dict = None):
+        cfg = config or {}
+        collectors = cfg.get("collectors", {}).get("syslog", {})
+        self.host = collectors.get("bind", host)
+        self.port = collectors.get("port", port)
+        self.rate_limit = collectors.get("rate_limit", 100)
         self.callback = callback
         self.config = config or {}
         self.running = False
         self.thread = None
         self.socket = None
+        self._lock = threading.Lock()
 
-        # Statistics
         self.stats = {
             "messages_received": 0,
             "messages_parsed": 0,
@@ -88,9 +92,9 @@ class SyslogServer:
             "by_severity": defaultdict(int)
         }
 
-        # Message buffer for batch processing
         self.message_buffer = []
         self.buffer_size = 100
+        self._rate_windows: Dict[str, List[float]] = {}
 
     def start(self):
         """Start syslog server."""
@@ -123,27 +127,41 @@ class SyslogServer:
             self.thread.join(timeout=2)
         logger.info(f"Syslog server stopped. Stats: {self.stats}")
 
+    def _rate_limited(self, ip: str) -> bool:
+        now = time.time()
+        with self._lock:
+            times = self._rate_windows.get(ip, [])
+            times = [t for t in times if now - t < 1.0]
+            if len(times) >= self.rate_limit:
+                return True
+            times.append(now)
+            self._rate_windows[ip] = times
+
     def _receive_loop(self):
         """Main receive loop."""
         while self.running:
             try:
                 data, addr = self.socket.recvfrom(4096)
                 if data:
-                    self.stats["messages_received"] += 1
-                    msg = self._parse_message(data.decode('utf-8', errors='ignore'), addr[0])
+                    src_ip = addr[0]
+                    if self._rate_limited(src_ip):
+                        continue
+                    with self._lock:
+                        self.stats["messages_received"] += 1
+                    msg = self._parse_message(data.decode('utf-8', errors='ignore'), src_ip)
                     if msg:
-                        self.stats["messages_parsed"] += 1
-                        self.stats["by_facility"][msg.facility] += 1
-                        self.stats["by_severity"][msg.severity] += 1
+                        with self._lock:
+                            self.stats["messages_parsed"] += 1
+                            self.stats["by_facility"][msg.facility] += 1
+                            self.stats["by_severity"][msg.severity] += 1
 
-                        # Check for attacks
                         attack = self._analyze_message(msg)
                         if attack:
-                            self.stats["attacks_detected"] += 1
+                            with self._lock:
+                                self.stats["attacks_detected"] += 1
                             if self.callback:
                                 self.callback(attack)
                         elif self.callback:
-                            # Pass normal log too
                             self.callback({"type": "log", "message": msg})
 
             except socket.timeout:
@@ -192,7 +210,7 @@ class SyslogServer:
                 message=msgid + " " + structured,
                 source_ip=""
             )
-        except:
+        except (ValueError, AttributeError):
             return self._parse_rfc3164(raw)
 
     def _parse_rfc3164(self, raw: str) -> Optional[SyslogMessage]:
@@ -209,7 +227,7 @@ class SyslogServer:
             year = datetime.now().year
             try:
                 timestamp = datetime.strptime(f"{year} {timestamp_str}", "%Y %b %d %H:%M:%S")
-            except:
+            except ValueError:
                 timestamp = datetime.now()
 
             return SyslogMessage(
@@ -222,7 +240,7 @@ class SyslogServer:
                 message=message,
                 source_ip=""
             )
-        except:
+        except (ValueError, AttributeError, IndexError):
             return None
 
     def _analyze_message(self, msg: SyslogMessage) -> Optional[Dict]:
@@ -261,13 +279,14 @@ class SyslogServer:
 
     def get_stats(self) -> Dict:
         """Get syslog server statistics."""
-        stats = self.stats.copy()
-        stats["by_facility"] = dict(self.stats["by_facility"])
-        stats["by_severity"] = dict(self.stats["by_severity"])
+        with self._lock:
+            stats = self.stats.copy()
+            stats["by_facility"] = dict(self.stats["by_facility"])
+            stats["by_severity"] = dict(self.stats["by_severity"])
         return stats
 
 
-def create_syslog_server(host: str = "0.0.0.0", port: int = 514, callback: Optional[Callable] = None, config: dict = None) -> SyslogServer:
+def create_syslog_server(host: str = "127.0.0.1", port: int = 514, callback: Optional[Callable] = None, config: dict = None) -> SyslogServer:
     """Factory function to create syslog server."""
     return SyslogServer(host=host, port=port, callback=callback, config=config)
 

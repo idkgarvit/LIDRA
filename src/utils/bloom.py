@@ -23,8 +23,11 @@ class BloomFilter:
     def _hashes(self, item: str):
         h = hashlib.sha256(item.encode()).digest()
         for i in range(self._hash_count):
-            val = int.from_bytes(h[i * 4:(i + 1) * 4], "big") if (i + 1) * 4 <= len(h) else hash((item, i))
-            yield val % self._bit_count
+            if (i + 1) * 4 <= len(h):
+                val = int.from_bytes(h[i * 4:(i + 1) * 4], "big")
+            else:
+                val = hash((item, i))
+            yield abs(val) % self._bit_count
 
     def add(self, item: str):
         for bit in self._hashes(item):

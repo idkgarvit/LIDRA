@@ -2,7 +2,9 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from threading import RLock
 from typing import Dict, List, Optional, Tuple
+from utils.config_loader import get_cfg
 
 logger = logging.getLogger(__name__)
 
@@ -28,32 +30,16 @@ def _stream_key(client_ip: str, server_ip: str, client_port: int, server_port: i
     return (client_ip, server_ip, client_port, server_port)
 
 
-_HTTP_PORTS = None
-
-
 def _get_http_ports():
-    global _HTTP_PORTS
-    if _HTTP_PORTS is not None:
-        return _HTTP_PORTS
-    import yaml
-    from pathlib import Path
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    default = {80, 443, 8080, 8081, 8082, 8888, 8000, 8443, 3000, 5000}
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        ports = cfg.get("http_ports", [])
-        if ports:
-            _HTTP_PORTS = set(ports)
-    if _HTTP_PORTS is None:
-        _HTTP_PORTS = default
-    return _HTTP_PORTS
+    ports = get_cfg("http_ports", [80, 443, 8080, 8081, 8082, 8888, 8000, 8443, 3000, 5000])
+    return set(ports) if ports else {80, 443, 8080, 8081, 8082, 8888, 8000, 8443, 3000, 5000}
 
 
 class StreamReassembler:
     def __init__(self, max_streams: int = 10000):
         self._streams: Dict[_STREAM_KEY, TcpStream] = {}
         self._max_streams = max_streams
+        self._lock = RLock()
 
     def add_segment(self, packet: Dict, direction: str = "client") -> Optional[List[bytes]]:
         src_ip = packet.get("src_ip", "")
@@ -73,32 +59,33 @@ class StreamReassembler:
             key = _stream_key(dst_ip, src_ip, dst_port, src_port)
             is_client = False
 
-        stream = self._streams.get(key)
-        if not stream:
-            if len(self._streams) >= self._max_streams:
-                return None
-            stream = TcpStream(
-                client_ip=src_ip if is_client else dst_ip,
-                server_ip=dst_ip if is_client else src_ip,
-                client_port=src_port if is_client else dst_port,
-                server_port=dst_port if is_client else src_port,
-            )
-            self._streams[key] = stream
+        with self._lock:
+            stream = self._streams.get(key)
+            if not stream:
+                if len(self._streams) >= self._max_streams:
+                    return None
+                stream = TcpStream(
+                    client_ip=src_ip if is_client else dst_ip,
+                    server_ip=dst_ip if is_client else src_ip,
+                    client_port=src_port if is_client else dst_port,
+                    server_port=dst_port if is_client else src_port,
+                )
+                self._streams[key] = stream
 
-        stream.last_activity = time.time()
+            stream.last_activity = time.time()
 
-        if is_client:
-            if payload and seq >= stream.client_seq:
-                stream.client_buffer.extend(payload)
-                stream.client_seq = seq + len(payload)
-                complete_messages = self._extract_messages(stream.client_buffer, stream.server_port)
-                return complete_messages
-        else:
-            if payload and seq >= stream.server_seq:
-                stream.server_buffer.extend(payload)
-                stream.server_seq = seq + len(payload)
-                complete_messages = self._extract_messages(stream.server_buffer, stream.server_port)
-                return complete_messages
+            if is_client:
+                if payload and seq >= stream.client_seq:
+                    stream.client_buffer.extend(payload)
+                    stream.client_seq = seq + len(payload)
+                    complete_messages = self._extract_messages(stream.client_buffer, stream.server_port)
+                    return complete_messages
+            else:
+                if payload and seq >= stream.server_seq:
+                    stream.server_buffer.extend(payload)
+                    stream.server_seq = seq + len(payload)
+                    complete_messages = self._extract_messages(stream.server_buffer, stream.server_port)
+                    return complete_messages
 
         return None
 
@@ -135,13 +122,15 @@ class StreamReassembler:
         return messages
 
     def get_stream(self, key: _STREAM_KEY) -> Optional[TcpStream]:
-        return self._streams.get(key)
+        with self._lock:
+            return self._streams.get(key)
 
     def cleanup_stale(self, timeout: int = 300):
-        now = time.time()
-        stale = [key for key, stream in self._streams.items()
-                 if now - stream.last_activity > timeout]
-        for key in stale:
-            del self._streams[key]
-        if stale:
-            logger.debug(f"[StreamReasm] Cleaned {len(stale)} stale streams")
+        with self._lock:
+            now = time.time()
+            stale = [key for key, stream in self._streams.items()
+                     if now - stream.last_activity > timeout]
+            for key in stale:
+                del self._streams[key]
+            if stale:
+                logger.debug(f"[StreamReasm] Cleaned {len(stale)} stale streams")

@@ -3,12 +3,13 @@ from textual.screen import Screen
 from textual.widgets import Header, Footer, Static
 from textual.containers import Vertical
 
+from ..footer import CompactFooter
+
 BRIDGE_STYLE = {"UP": "bold green", "DOWN": "bold red", "UNKNOWN": "gray"}
 
 
 class ConfigScreen(Screen):
     def compose(self) -> ComposeResult:
-        yield Header()
         yield Static("Configuration & Status", id="config-title")
         with Vertical(id="config-body"):
             yield Static("Bridge Interfaces: configured in config.yaml", classes="config-item", id="cfg-interfaces")
@@ -17,7 +18,7 @@ class ConfigScreen(Screen):
             yield Static("Active Blocks: 0", classes="config-item", id="cfg-blocks")
             yield Static("Total Packets: 0", classes="config-item", id="cfg-packets")
             yield Static("Total Attacks: 0", classes="config-item", id="cfg-attacks")
-        yield Footer()
+        yield CompactFooter()
 
     def on_mount(self) -> None:
         self.set_interval(3.0, self.refresh_status)

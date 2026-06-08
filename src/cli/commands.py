@@ -2,8 +2,6 @@
 """LIDRA CLI Commands - All command implementations via Web API."""
 
 import os
-import sys
-import time
 import subprocess
 import psutil
 import requests
@@ -32,7 +30,7 @@ def check_docker():
     try:
         result = subprocess.run(['docker', 'ps'], capture_output=True, text=True, timeout=5)
         return 'lidra-core' in result.stdout
-    except:
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
         return False
 
 
@@ -44,7 +42,7 @@ def api_get(endpoint: str) -> dict:
         if resp.status_code == 200:
             return resp.json()
     except Exception as e:
-        pass
+        logger.debug(f"[CLI] API request failed: {e}")
     return {}
 
 
@@ -235,23 +233,6 @@ print("OK")
     return False
 
 
-def cmd_web(args: List[str]) -> bool:
-    """Show web dashboard URL."""
-    console.print(Panel(
-        "[cyan]Web Dashboard:[/cyan] [bold]http://localhost:8080[/bold]\n\n"
-        "[dim]Endpoints:[/dim]\n"
-        "  • /               - Main dashboard\n"
-        "  • /api/stats      - System stats\n"
-        "  • /api/attack-types - Attack types\n"
-        "  • /api/alerts     - Alerts\n"
-        "  • /api/honeypot-stats - Honeypot data\n"
-        "  • /api/mitre-coverage - MITRE",
-        title="[bold]Web Dashboard[/bold]",
-        box=box.DOUBLE
-    ))
-    return True
-
-
 def cmd_dashboard(args: List[str]) -> bool:
     """Run the terminal dashboard via API."""
     return cmd_full_dashboard(args)
@@ -341,6 +322,39 @@ def cmd_agent(args: List[str]) -> bool:
     return True
 
 
+def cmd_doctor(args: List[str]) -> bool:
+    """Run system health check."""
+    from cli.doctor_cmd import cmd_doctor as _doctor
+    return _doctor(args)
+
+
+def cmd_install(args: List[str]) -> bool:
+    """Show install instructions or run installer."""
+    prefix = args[0] if args else "/opt/lidra"
+    user = "root"
+    src_dir = str(BASE_DIR)
+
+    console.print(Panel(
+        f"[bold]LIDRA Installation Plan[/bold]\n\n"
+        f"Prefix: [cyan]{prefix}[/cyan]\n"
+        f"User:   [cyan]{user}[/cyan]\n"
+        f"Source: [cyan]{src_dir}[/cyan]\n\n"
+        f"To install, run the post-install script:\n"
+        f"  [green]sudo LIDRA_PREFIX={prefix} bash install/post_install.sh[/green]\n\n"
+        f"Or run manually:\n"
+        f"  1. Install system packages (python3-pip, iptables, libpcap-dev, ethtool)\n"
+        f"  2. Create venv: [cyan]python3 -m venv {prefix}/venv[/cyan]\n"
+        f"  3. Install deps: [cyan]{prefix}/venv/bin/pip install -r requirements.txt[/cyan]\n"
+        f"  4. Copy source: [cyan]rsync -a --delete --exclude=venv {src_dir}/ {prefix}/[/cyan]\n"
+        f"  5. Install systemd unit: [cyan]cp install/systemd/lidra.service /etc/systemd/system/[/cyan]\n"
+        f"  6. Enable: [cyan]systemctl enable --now lidra.service[/cyan]\n"
+        f"  7. Verify: [cyan]lidra doctor[/cyan]",
+        title="[bold green]LIDRA Install[/bold green]",
+        border_style="green",
+    ))
+    return True
+
+
 def cmd_help(args: List[str]) -> bool:
     """Show help."""
     console.print("""
@@ -352,12 +366,13 @@ def cmd_help(args: List[str]) -> bool:
   lidra alerts    - Show recent alerts
   lidra blocks    - Show active blocks
   lidra mitre     - Show MITRE ATT&CK coverage
-  lidra web       - Show web dashboard URL
   lidra logs      - Show logs
+  lidra doctor    - System health check (read-only)
 
 [yellow]Actions:[/green]
   lidra honeypot  - Start honeypot service
   lidra test      - Add test attack data
+  lidra install   - Show install instructions
 
 [red]Block Management:[/red]
   lidra block <ip>   - Block an IP
@@ -379,7 +394,9 @@ COMMANDS = {
     'mitre': (cmd_mitre, 'Show MITRE coverage'),
     'logs': (cmd_logs, 'Show logs'),
     'test': (cmd_test, 'Add test data'),
-    'web': (cmd_web, 'Show web dashboard'),
+    'doctor': (cmd_doctor, 'Run system health check'),
+    'install': (cmd_install, 'Show install instructions'),
+    'web': (cmd_dashboard, 'Show terminal dashboard'),
     'dashboard': (cmd_dashboard, 'Run terminal dashboard'),
     'full_dashboard': (cmd_full_dashboard, 'Full dashboard'),
     'honeypot': (cmd_honeypot, 'Start honeypot'),

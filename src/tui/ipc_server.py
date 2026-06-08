@@ -10,7 +10,6 @@ import logging
 import os
 import socket
 import threading
-import time
 from typing import Callable, Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -22,9 +21,13 @@ SOCKET_PREFIX = "lidra_tui"
 class TUIIPCServer:
     """Unix-socket server that streams engine events to the TUI subprocess."""
 
-    def __init__(self, snapshot_fn: Callable[[], Dict], event_queue=None):
+    def __init__(self, snapshot_fn: Callable[[], Dict], event_queue=None,
+                 block_fn: Callable[[str], None] = None,
+                 unblock_fn: Callable[[str], None] = None):
         self._snapshot_fn = snapshot_fn
         self._event_queue = event_queue  # Optional shared asyncio.Queue from engine's TUIDataProvider
+        self._block_fn = block_fn
+        self._unblock_fn = unblock_fn
         self._clients: Set[socket.socket] = set()
         self._lock = threading.Lock()
         self._running = False
@@ -44,7 +47,7 @@ class TUIIPCServer:
         try:
             os.unlink(self._socket_path)
         except FileNotFoundError:
-            pass
+            logger.debug("[TUI-IPC] No stale socket to unlink")
 
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server_sock.bind(self._socket_path)
@@ -65,17 +68,17 @@ class TUIIPCServer:
                 try:
                     client.close()
                 except Exception:
-                    pass
+                    logger.debug("[TUI-IPC] Client close error (remote disconnect)")
             self._clients.clear()
         if self._server_sock:
             try:
                 self._server_sock.close()
             except Exception:
-                pass
+                logger.debug("[TUI-IPC] Server socket close error")
         try:
             os.unlink(self._socket_path)
         except FileNotFoundError:
-            pass
+            logger.debug("[TUI-IPC] Socket path already removed")
         logger.info("[TUI-IPC] Server stopped")
 
     def broadcast_event(self, event: dict):
@@ -95,7 +98,7 @@ class TUIIPCServer:
                 try:
                     client.close()
                 except Exception:
-                    pass
+                    logger.debug("[TUI-IPC] Dead client close error")
 
     def _accept_loop(self):
         while self._running:
@@ -147,14 +150,37 @@ class TUIIPCServer:
             try:
                 client.close()
             except Exception:
-                pass
+                logger.debug("[TUI-IPC] Client cleanup error")
 
     def _handle_message(self, msg: dict, client: socket.socket):
         cmd = msg.get("command", "")
-        if cmd == "SNAPSHOT":
+        if cmd == "SUBSCRIBE":
+            ack = (json.dumps({"type": "event", "data": {"type": "subscribed"}}) + "\n").encode()
+            try:
+                client.sendall(ack)
+            except Exception:
+                pass
+        elif cmd == "SNAPSHOT":
             try:
                 snapshot = self._snapshot_fn()
                 payload = (json.dumps({"type": "snapshot", "data": snapshot}) + "\n").encode()
                 client.sendall(payload)
             except Exception as e:
                 logger.warning(f"[TUI-IPC] Snapshot error: {e}")
+        elif cmd == "BLOCK":
+            ip = msg.get("ip", "")
+            reason = msg.get("reason", "tui_block")
+            if ip and self._block_fn:
+                try:
+                    self._block_fn(ip, reason)
+                    logger.info(f"[TUI-IPC] Blocked {ip} from TUI")
+                except Exception as e:
+                    logger.warning(f"[TUI-IPC] Block {ip} failed: {e}")
+        elif cmd == "UNBLOCK":
+            ip = msg.get("ip", "")
+            if ip and self._unblock_fn:
+                try:
+                    self._unblock_fn(ip)
+                    logger.info(f"[TUI-IPC] Unblocked {ip} from TUI")
+                except Exception as e:
+                    logger.warning(f"[TUI-IPC] Unblock {ip} failed: {e}")

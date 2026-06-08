@@ -1,0 +1,42 @@
+# LIDRA systemd service unit
+#
+# To override paths (non-default install location, custom venv, etc.):
+#   1. Copy the relevant EnvironmentFile template:
+#        sudo cp /opt/lidra/install/default/lidra /etc/default/lidra
+#      Edit /etc/default/lidra and set LIDRA_ROOT / LIDRA_VENV / LIDRA_USER etc.
+#   2. Add `EnvironmentFile=/etc/default/lidra` under [Service] below.
+#   3. Reload: sudo systemctl daemon-reload && sudo systemctl restart lidra
+
+[Unit]
+Description=LIDRA Intrusion Detection & Response Agent
+Documentation=https://github.com/anomalyco/lidra
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/lidra
+ExecStart=/opt/lidra/venv/bin/python3 /opt/lidra/src/lidra_agent_v3.py
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+Environment=PYTHONUNBUFFERED=1
+Environment=LIDRA_ROOT=/opt/lidra
+
+LimitNOFILE=65536
+LimitNPROC=4096
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/lidra /var/log/lidra
+
+StandardOutput=append:/var/log/lidra/service.log
+StandardError=append:/var/log/lidra/service_error.log
+
+[Install]
+WantedBy=multi-user.target

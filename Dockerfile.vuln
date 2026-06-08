@@ -1,0 +1,9 @@
+FROM python:3.13-slim-bookworm
+
+WORKDIR /opt/lidra
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY demo/vuln_server.py demo/
+EXPOSE 8081
+CMD ["python3", "demo/vuln_server.py", "8081"]

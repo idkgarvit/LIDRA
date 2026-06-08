@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check import sanity
+        run: |
+          PYTHONPATH=src python -c "
+            import sys; sys.path.insert(0, 'src')
+            mods = [
+              'lidra_agent_v3',
+              'detection.dpi_engine',
+              'detection.ml.anomaly',
+              'detection.attack_detector',
+              'detection.mitre',
+              'detection.explainer',
+              'bridge.inline_engine',
+              'soar.engine',
+              'cli.main',
+              'tui.app',
+              'ebpf.tracer',
+              'metrics.server',
+            ]
+            for m in mods:
+              __import__(m)
+              print(f'  OK  {m}')
+            print('All imports OK')
+          "
+
+      - name: Run tests
+        run: |
+          PYTHONPATH=src python -m pytest tests/ -q --tb=short --ignore=tests/attack_pcap
+
+      - name: Verify config / prometheus rules / runbook
+        run: |
+          python3 -c "import yaml; yaml.safe_load(open('config/config.yaml')); print('config.yaml: OK')"
+          python3 -c "import yaml; yaml.safe_load(open('config/prometheus.yml')); print('prometheus.yml: OK')"
+          python3 -c "import yaml; yaml.safe_load(open('config/alerting_rules.yml')); print('alerting_rules.yml: OK')"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install lint tools
+        run: |
+          pip install flake8 black
+
+      - name: Lint with flake8
+        run: flake8 src/ --max-line-length=120 --extend-ignore=E203,W503 --exclude=__pycache__
+
+      - name: Check formatting with black
+        run: black --check --diff src/ || true
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build --target=test -t lidra:test .
+
+      - name: Run tests in Docker
+        run: docker run --rm lidra:test

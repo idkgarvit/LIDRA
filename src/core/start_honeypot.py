@@ -7,7 +7,10 @@ import time
 import socket
 import threading
 import signal
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from datetime import datetime
 
 BASE = Path(__file__).parent.parent
@@ -83,8 +86,8 @@ def start_honeypot_server():
             try:
                 client.send(response)
                 time.sleep(0.5)
-            except:
-                pass
+            except (OSError, BrokenPipeError, ConnectionResetError):
+                logger.debug("[Honeypot] Client disconnected during attack simulation")
             client.close()
 
             record_honeypot_hit(ip)

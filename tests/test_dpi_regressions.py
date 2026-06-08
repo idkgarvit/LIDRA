@@ -75,3 +75,56 @@ class TestDPIEngineRegressions:
         parsed = dpi._parse_http(h2)
         assert parsed is not None
         assert parsed.get("http2") is True
+
+    def test_tls_fingerprint_fires_through_dpi_engine(self):
+        """C1: TLS ClientHello should produce a tls_fingerprint detection
+        through inspect_stream(). Before the fix, the TLS branch in
+        inspect_stream() only checked for malicious_jA4 fingerprints;
+        benign ClientHello traffic was silently ignored, so the pipeline
+        never picked up the fingerprint.
+        """
+        import struct
+
+        dpi = DPIEngine()
+
+        # Build a real-looking TLS ClientHello with a valid SNI extension
+        sni_name = b"example.com"
+        sni_entry = struct.pack("B", 0) + struct.pack(">H", len(sni_name)) + sni_name
+        sni_list = struct.pack(">H", len(sni_entry)) + sni_entry
+        sni_extension = (
+            struct.pack(">H", 0x0000)
+            + struct.pack(">H", len(sni_list))
+            + sni_list
+        )
+        extensions_block = struct.pack(">H", len(sni_extension)) + sni_extension
+
+        random_bytes = b"\x02" * 32
+        ciphers_body = struct.pack(">HHHH", 0x1301, 0x1302, 0x1303, 0xC02B)
+        ciphers = struct.pack(">H", len(ciphers_body)) + ciphers_body
+        session_id = struct.pack("B", 0)
+        compression = struct.pack("B", 0)
+
+        client_hello = (
+            struct.pack(">H", 0x0303)  # TLS 1.2
+            + random_bytes
+            + session_id
+            + ciphers
+            + compression
+            + extensions_block
+        )
+        hello_len = len(client_hello)
+        handshake = struct.pack("B", 0x01) + struct.pack(">I", hello_len)[1:] + client_hello
+        record_len = len(handshake)
+        tls_record = (
+            struct.pack("B", 0x16)  # Handshake content type
+            + struct.pack(">H", 0x0303)
+            + struct.pack(">H", record_len)
+            + handshake
+        )
+
+        result = dpi.inspect_stream(tls_record, "tls")
+
+        assert result is not None
+        assert result.attack_type == "tls_fingerprint"
+        assert result.severity == "info"
+        assert "JA4=" in result.details

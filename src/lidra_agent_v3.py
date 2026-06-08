@@ -100,6 +100,7 @@ class LIDRAv3:
     def __init__(self, config: dict):
         self.config = config
         self.running = False
+        self._config_mtime = 0
         self.mode = config.get('mode', 'inline')
 
         if config.get('general', {}).get('verbose', False) or os.environ.get("LIDRA_LOG_LEVEL") == "DEBUG":
@@ -672,38 +673,7 @@ class LIDRAv3:
             return
 
 
-        # Start IPC server so TUI subprocess gets live data
-        self._tui_ipc_server = None
-        if self.tui_data_provider and TUIIPCServer:
-            try:
-                ipc = TUIIPCServer(
-                    snapshot_fn=self.tui_data_provider.get_snapshot,
-                )
-                ipc.start()
-                self._tui_ipc_server = ipc
-                logger.info(f"[TUI-IPC] Server at {ipc.socket_path}")
-            except Exception as e:
-                logger.warning(f"[TUI-IPC] Failed to start: {e}")
-
-        # Launch Textual TUI as a subprocess (main thread required by LinuxDriver)
-        tui_process = None
-        if self.config.get('tui', {}).get('enabled', True):
-            try:
-                env = dict(os.environ)
-                if self._tui_ipc_server:
-                    env["LIDRA_TUI_SOCKET"] = self._tui_ipc_server.socket_path
-                tui_process = subprocess.Popen(
-                    [sys.executable, "-m", "src.tui.app", "--standalone"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env,
-                )
-                logger.info(f"[TUI] Textual dashboard launched (PID {tui_process.pid})")
-            except Exception as e:
-                logger.warning(f"[TUI] Failed to launch: {e}")
-        else:
-            logger.info("[TUI] TUI disabled in config")
-        self._tui_process = tui_process
+        self._launch_tui()
 
         cleanup_interval = 300
         last_cleanup = time.time()
@@ -745,6 +715,46 @@ class LIDRAv3:
             logger.info("LIDRA v3 inline mode stopped by user")
         finally:
             self.stop()
+
+    def _launch_tui(self):
+        """Start IPC server and TUI subprocess (shared by inline + local modes)."""
+        self._tui_ipc_server = None
+        if self.tui_data_provider and TUIIPCServer:
+            firewall = getattr(self, 'firewall', None)
+            block_fn = unblock_fn = None
+            if firewall:
+                block_fn = lambda ip, reason: firewall.block_ip(ip, ttl_seconds=3600)
+                unblock_fn = firewall.unblock_ip
+            try:
+                ipc = TUIIPCServer(
+                    snapshot_fn=self.tui_data_provider.get_snapshot,
+                    block_fn=block_fn,
+                    unblock_fn=unblock_fn,
+                )
+                ipc.start()
+                self._tui_ipc_server = ipc
+                logger.info(f"[TUI-IPC] Server at {ipc.socket_path}")
+            except Exception as e:
+                logger.warning(f"[TUI-IPC] Failed to start: {e}")
+
+        tui_process = None
+        if self.config.get('tui', {}).get('enabled', True):
+            try:
+                env = dict(os.environ)
+                if self._tui_ipc_server:
+                    env["LIDRA_TUI_SOCKET"] = self._tui_ipc_server.socket_path
+                tui_process = subprocess.Popen(
+                    [sys.executable, "-m", "src.tui.app", "--standalone"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                )
+                logger.info(f"[TUI] Textual dashboard launched (PID {tui_process.pid})")
+            except Exception as e:
+                logger.warning(f"[TUI] Failed to launch: {e}")
+        else:
+            logger.info("[TUI] TUI disabled in config")
+        self._tui_process = tui_process
 
     def _ensure_nfqueue_module(self) -> bool:
         """Load nfnetlink_queue kernel module if not already loaded."""
@@ -788,38 +798,7 @@ class LIDRAv3:
             self.tracer.start()
             logger.info("[Tracer] Log file monitoring started")
 
-
-        # Start IPC server so TUI subprocess gets live data
-        self._tui_ipc_server = None
-        if self.tui_data_provider and TUIIPCServer:
-            try:
-                ipc = TUIIPCServer(
-                    snapshot_fn=self.tui_data_provider.get_snapshot,
-                )
-                ipc.start()
-                self._tui_ipc_server = ipc
-                logger.info(f"[TUI-IPC] Server at {ipc.socket_path}")
-            except Exception as e:
-                logger.warning(f"[TUI-IPC] Failed to start: {e}")
-
-        tui_process = None
-        if self.config.get('tui', {}).get('enabled', True):
-            try:
-                env = dict(os.environ)
-                if self._tui_ipc_server:
-                    env["LIDRA_TUI_SOCKET"] = self._tui_ipc_server.socket_path
-                tui_process = subprocess.Popen(
-                    [sys.executable, "-m", "src.tui.app", "--standalone"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env,
-                )
-                logger.info(f"[TUI] Textual dashboard launched (PID {tui_process.pid})")
-            except Exception as e:
-                logger.warning(f"[TUI] Failed to launch: {e}")
-        else:
-            logger.info("[TUI] TUI disabled in config")
-        self._tui_process = tui_process
+        self._launch_tui()
 
         cleanup_interval = 300
         last_cleanup = time.time()
@@ -957,7 +936,23 @@ class LIDRAv3:
             self.firewall.block_ip(ip, f"honeypot_{attack_type}")
 
         logger.warning(f"[HONEYPOT] {attack_type} from {ip} - auto-blocked")
+
+    # ── Config Hot-Reload ──────────────────────────────────────────────
+    def reload_config(self, new_config: dict):
+        old_mode = self.config.get("mode")
+        new_mode = new_config.get("mode")
+        self.config = new_config
+        if old_mode != new_mode:
+            logger.warning(f"Mode changed from {old_mode} to {new_mode} — restart required for full effect")
+        if self.config.get("general", {}).get("verbose", False):
+            logging.getLogger().setLevel(logging.DEBUG)
+        self.threat_intel = self._init_threat_intel()
+        self.notifier = self._init_alerting()
+        if hasattr(self, "firewall") and self.firewall:
+            self.firewall.dry_run = _config_dry_run(self.config)
+        self._config_mtime = time.time()
     
+    # ── Lifecycle ──────────────────────────────────────────────────────
     def stop(self):
         """Stop LIDRA v3."""
         self.running = False
@@ -1012,6 +1007,13 @@ def main():
     (BASE / "logs").mkdir(exist_ok=True)
     (BASE / "state").mkdir(exist_ok=True)
 
+    from metrics.server import MetricsServer
+    metrics_port = int(os.environ.get("LIDRA_METRICS_PORT", 8080))
+    metrics_cert = os.environ.get("LIDRA_METRICS_CERT") or None
+    metrics_key = os.environ.get("LIDRA_METRICS_KEY") or None
+    metrics_srv = MetricsServer(port=metrics_port, cert_path=metrics_cert, key_path=metrics_key)
+    metrics_srv.start()
+
     import socket as _socket
     pid_path = None
     for candidate in (Path("/var/run/lidra/lidra.pid"), Path("/run/lidra/lidra.pid")):
@@ -1043,8 +1045,17 @@ def main():
             pid_path.unlink()
         sys.exit(0)
 
+    def _reload(signum, frame):
+        logger.info("Received SIGHUP — reloading config...")
+        try:
+            new_config = load_central_config()
+            lidra.reload_config(new_config)
+            logger.info("Config reloaded successfully")
+        except Exception as e:
+            logger.error(f"Config reload failed: {e}")
+
     signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGHUP, _shutdown)
+    signal.signal(signal.SIGHUP, _reload)
     lidra.run()
 
 

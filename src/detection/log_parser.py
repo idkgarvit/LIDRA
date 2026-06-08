@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Iterator
 from dataclasses import dataclass
+from urllib.parse import unquote_plus
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,14 @@ class LogParser:
             r'(?P<timestamp>\d{4}-\d{2}-\d{2}\s+[\d:]+)\s+\d+\s+\[Warning\]\s+Access\s+denied\s+for\s+user\s+\'(?P<user>\S+)\'@\'(?P<ip>[\d.]+)\'',
             re.IGNORECASE
         ),
+        'mysql_failed2': re.compile(
+            r'(?P<timestamp>\d{4}-\d{2}-\d{2}\s+[\d:]+)\s+\d+\s+\[Warning\]\s+Access\s+denied\s+for\s+user\s+(?P<user>\S+)@(?P<ip>[\d.]+)',
+            re.IGNORECASE
+        ),
+
+        'postgres_failed': re.compile(
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+postgres\[\d+\]:\s+.*FATAL:\s+password\s+authentication\s+failed\s+for\s+user\s+"(?P<user>\S+)".*\s+host=(?P<ip>[\d.]+)'
+        ),
 
         # Postfix (SMTP)
         'postfix_sasl': re.compile(
@@ -68,9 +77,17 @@ class LogParser:
             r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+dovecot:\s+auth:\s+Error:\s+Password\s+verification\s+failed\s+for\s+user\s+(?P<user>\S+):\s+.*\s+rip=(?P<ip>[\d.]+)'
         ),
 
+        'pop3_failed': re.compile(
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+dovecot:\s+(?:pop3|pop3-login):\s+.*Password\s+verification\s+failed\s+for\s+user\s+(?P<user>\S+).*\s+rip=(?P<ip>[\d.]+)'
+        ),
+
         # vsftpd/proftpd (FTP)
         'ftp_failed': re.compile(
             r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+\S+ftp[d]?\[\d+\]:\s+\S+\s+FAIL\s+Login\s+from\s+(?P<ip>[\d.]+)\s+for\s+\'(?P<user>\S+)\''
+        ),
+
+        'ftp_anonymous': re.compile(
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+\S+ftp[d]?\[\d+\]:\s+.*ANONYMOUS\s+LOGIN.*\s+(?P<ip>[\d.]+)'
         ),
 
         # MongoDB unauthorized
@@ -200,6 +217,14 @@ class LogParser:
             r"\x17\x03\x03",
             re.IGNORECASE
         ),
+        'eternalblue': re.compile(
+            r'\x00\x00\x00\x31\xff\x53\x4d\x42|\x00\x00\x00\x63\xff\x53\x4d\x42',
+            re.IGNORECASE
+        ),
+        'spectre_meltdown': re.compile(
+            r'(spectre|meltdown|CVE-2017-5753|CVE-2017-5715|CVE-2017-5754)',
+            re.IGNORECASE
+        ),
         
         # Malware Indicators
         'webshell_pattern': re.compile(
@@ -236,9 +261,12 @@ class LogParser:
                 # Parse timestamp
                 ts = self._parse_timestamp(groups.get('timestamp', ''))
 
-                # Check for web attacks inside the matched log line
-                attack_info = self._check_web_attack(line)
-                log_type = attack_info['attack_type'] if attack_info else pattern_name
+                # Only check web attacks if the matched pattern is web-related
+                if pattern_name in ('web_access',) or 'http' in str(line).lower():
+                    attack_info = self._check_web_attack(line)
+                    log_type = attack_info['attack_type'] if attack_info else pattern_name
+                else:
+                    log_type = pattern_name
 
                 return LogEvent(
                     timestamp=ts or datetime.now(),
@@ -274,51 +302,52 @@ class LogParser:
 
     def _parse_timestamp(self, ts_str: str) -> Optional[datetime]:
         """Parse various timestamp formats."""
-        formats = [
-            '%b %d %H:%M:%S',  # syslog: Jan 15 10:30:45
-            '%Y-%m-%d %H:%M:%S',  # MySQL: 2024-01-15 10:30:45
-            '%Y-%m-%dT%H:%M:%S',  # ISO: 2024-01-15T10:30:45
-            '%d/%b/%Y:%H:%M:%S %z',  # Apache: 15/Jan/2024:10:30:45 +0000
-        ]
-
-        for fmt in formats:
-            try:
-                return datetime.strptime(ts_str.split('+')[0].split('-')[0] if 'T' not in ts_str else ts_str[:19], fmt.replace(' %z', ''))
-            except ValueError:
-                continue
+        t = ts_str.strip()
+        try:
+            if 'T' in t:
+                return datetime.strptime(t[:19], '%Y-%m-%dT%H:%M:%S')
+            if '/' in t:
+                return datetime.strptime(t, '%d/%b/%Y:%H:%M:%S %z')
+            if t[:1].isdigit() and '-' in t[:5]:
+                return datetime.strptime(t, '%Y-%m-%d %H:%M:%S')
+            year = datetime.now().year
+            return datetime.strptime(f'{year} {t}', '%Y %b %d %H:%M:%S')
+        except (ValueError, IndexError):
+            pass
         return None
 
     def _check_web_attack(self, line: str) -> Optional[Dict]:
         """Check if line contains web attack signatures."""
-        # Map pattern keys to attack type names
         attack_type_map = {
-            'sql_injection': 'sql_injection',
-            'xss': 'xss',
-            'path_traversal': 'path_traversal',
-            'lfi_attempt': 'lfi_attempt',
-            'rfi_attempt': 'rfi_attempt',
-            'command_injection': 'command_injection',
-            'ssrf_attempt': 'ssrf_attempt',
-            'xxe_attempt': 'xxe_attempt',
-            'ssti_attempt': 'ssti_attempt',
-            'deserialization': 'deserialization_attack',
-            'ldap_injection': 'ldap_injection',
-            'scanner_signature': 'scanner',
-            'admin_probe': 'admin_probe',
-            'sensitive_file': 'sensitive_file_access',
-            'api_enumeration': 'api_enumeration',
+            'sql_injection': 'web_sql_injection',
+            'xss': 'web_xss_attempt',
+            'path_traversal': 'web_path_traversal',
+            'lfi_attempt': 'web_lfi_attempt',
+            'rfi_attempt': 'web_rfi_attempt',
+            'command_injection': 'web_command_injection',
+            'ssrf_attempt': 'web_ssrf_attempt',
+            'xxe_attempt': 'web_xxe_attempt',
+            'ssti_attempt': 'web_ssti_attempt',
+            'deserialization': 'web_deserialization_attack',
+            'ldap_injection': 'web_ldap_injection',
+            'scanner_signature': 'web_scanner_detected',
+            'admin_probe': 'web_admin_probe',
+            'sensitive_file': 'web_sensitive_file_access',
+            'api_enumeration': 'web_api_enumeration',
             'shellshock': 'shellshock_attempt',
             'log4j': 'log4j_attempt',
             'webshell_pattern': 'webshell_upload',
             'reverse_shell': 'reverse_shell',
             'crypto_miner': 'crypto_miner',
+            'heartbleed': 'heartbleed_attempt',
+            'eternalblue': 'eternalblue_attempt',
+            'spectre_meltdown': 'spectre_meltdown',
         }
         
+        decoded = unquote_plus(line)
         for pattern_name, pattern in self.WEB_ATTACK_PATTERNS.items():
-            if pattern.search(line):
+            if pattern.search(line) or pattern.search(decoded):
                 attack_type = attack_type_map.get(pattern_name, pattern_name)
-                
-                # Try to extract IP and path
                 web_match = self.PATTERNS['web_access'].search(line)
                 return {
                     'attack_type': attack_type,
@@ -354,15 +383,16 @@ class LogParser:
         except Exception as e:
             logger.error(f"Error reading {log_path}: {e}")
 
-    def get_live_events(self, log_path: Path) -> Iterator[LogEvent]:
+    def get_live_events(self, log_path) -> Iterator[LogEvent]:
         """Monitor log file for new events (like tail -f)."""
         import time
+        from pathlib import Path
 
+        log_path = Path(log_path)
         if not log_path.exists():
             return
 
         with open(log_path, 'r', errors='ignore') as f:
-            # Go to end of file
             f.seek(0, 2)
 
             while True:

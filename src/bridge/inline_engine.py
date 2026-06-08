@@ -502,6 +502,19 @@ class InlineEngine:
                                 "confidence": dpi_result.confidence,
                                 "mitre": dpi_result.mitre,
                             })
+                elif conn and conn.app_protocol == "tls":
+                    payload = packet.get("payload", b"")
+                    if payload:
+                        dpi_result = self._dpi_engine.inspect_stream(payload, "tls")
+                        if dpi_result:
+                            detections.append({
+                                "attack_type": dpi_result.attack_type,
+                                "severity": dpi_result.severity,
+                                "source_ip": src_ip,
+                                "details": dpi_result.details,
+                                "confidence": dpi_result.confidence,
+                                "mitre": dpi_result.mitre,
+                            })
         else:
             payload = packet.get("payload", b"")
             if payload:

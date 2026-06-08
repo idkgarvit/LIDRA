@@ -2,24 +2,17 @@
 """Comprehensive attack detection for all server-based attacks."""
 
 import logging
-from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from collections import defaultdict
 from dataclasses import dataclass, field
-import yaml
+from utils.config_loader import get_cfg
 
 logger = logging.getLogger(__name__)
 
 
 def _get_brute_force_threshold():
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    try:
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        return cfg.get("thresholds", {}).get("brute_force", 5)
-    except Exception:
-        return 5
+    return get_cfg("thresholds.brute_force", 5)
 
 
 @dataclass
@@ -202,22 +195,17 @@ class AttackDetector:
         self.email_attempts: Dict[str, List[datetime]] = defaultdict(list)
         self.ftp_attempts: Dict[str, List[datetime]] = defaultdict(list)
         self.attack_history: Dict[str, List[str]] = defaultdict(list)
+        self.connection_rates: Dict[str, List[datetime]] = defaultdict(list)
 
         # Rate limiting for alerts
         self.last_alert: Dict[str, datetime] = {}
         self.alert_cooldown = 60  # seconds between same-type alerts
 
     def _load_config(self, config_path: Optional[str]) -> AttackConfig:
-        """Load configuration from file."""
-        if config_path and Path(config_path).exists():
-            with open(config_path) as f:
-                data = yaml.safe_load(f)
-                detection = data.get('detection', {})
-                return AttackConfig(
-                    ssh_failed_attempts=detection.get('thresholds', {}).get('ssh_failed_attempts', 5),
-                    time_window_seconds=detection.get('thresholds', {}).get('time_window_seconds', 300),
-                )
-        return AttackConfig()
+        return AttackConfig(
+            ssh_failed_attempts=get_cfg("thresholds.ssh_failed_attempts", 5),
+            time_window_seconds=get_cfg("thresholds.time_window_seconds", 300),
+        )
 
     def analyze_event(self, event) -> List[DetectedAttack]:
         """
@@ -229,18 +217,22 @@ class AttackDetector:
         if not event or not event.ip_address:
             return attacks
 
+        from utils.allowlist import should_suppress
+        suppress, reason = should_suppress(event.ip_address, getattr(event, 'log_type', ''))
+        if suppress:
+            return attacks
+
         ip = event.ip_address
         now = event.timestamp or datetime.now()
+        if now.tzinfo:
+            now = now.replace(tzinfo=None)
 
-        # Clean old entries
         self._cleanup_old_entries(now)
 
-        # Analyze based on log type
         attack = self._analyze_by_type(event, ip, now)
         if attack:
             attacks.append(attack)
 
-        # Check for distributed attacks (multiple IPs, same pattern)
         distributed = self._check_distributed_attack(event, now)
         if distributed:
             attacks.append(distributed)
@@ -251,15 +243,18 @@ class AttackDetector:
         """Analyze event based on log type."""
         log_type = event.log_type or ''
 
-        # SSH Attacks
-        if 'ssh_failed' in log_type or 'ssh_invalid' in log_type:
-            return self._check_ssh_bruteforce(ip, event, now)
+        if 'ssh_connection_closed' in log_type:
+            return self._check_ssh_flood(ip, event, now)
 
+        # SSH Attacks
         if 'ssh_invalid_user' in log_type:
             return self._create_attack(
                 'ssh_invalid_user', ip, event,
                 details={'username': event.username, 'port': event.port}
             )
+
+        if 'ssh_failed' in log_type:
+            return self._check_ssh_bruteforce(ip, event, now)
 
         # Web Attacks
         if 'web_' in log_type:
@@ -268,6 +263,9 @@ class AttackDetector:
         # Database Attacks
         if 'mysql' in log_type:
             return self._check_db_bruteforce('mysql', ip, event, now)
+
+        if 'postgres' in log_type:
+            return self._check_db_bruteforce('postgres', ip, event, now)
 
         if 'mongo' in log_type or 'redis' in log_type:
             return self._create_attack(
@@ -281,6 +279,12 @@ class AttackDetector:
 
         if 'dovecot' in log_type:
             return self._check_email_bruteforce('imap', ip, event, now)
+
+        if 'pop3' in log_type:
+            return self._check_email_bruteforce('pop3', ip, event, now)
+
+        if 'ftp_anonymous' in log_type:
+            return self._create_attack('anonymous_ftp', ip, event, details={'service': 'ftp'})
 
         # FTP Attacks
         if 'ftp' in log_type:
@@ -322,6 +326,24 @@ class AttackDetector:
                     'username': event.username,
                     'port': event.port,
                     'window_seconds': self.config.time_window_seconds
+                }
+            )
+        return None
+
+    def _check_ssh_flood(self, ip: str, event, now: datetime) -> Optional[DetectedAttack]:
+        self.connection_rates[ip].append(now)
+
+        cutoff = now - timedelta(seconds=60)
+        recent = [ts for ts in self.connection_rates[ip] if ts > cutoff]
+        self.connection_rates[ip] = recent
+
+        if len(recent) > 20:
+            self.connection_rates[ip] = []
+            return self._create_attack(
+                'ssh_connection_flood', ip, event,
+                details={
+                    'connection_count': len(recent),
+                    'window_seconds': 60
                 }
             )
         return None
@@ -398,9 +420,17 @@ class AttackDetector:
         if '() {' in line:
             return self._create_attack('shellshock_attempt', ip, event)
 
+        # EternalBlue
+        if '\xff\x53\x4d\x42' in line:
+            return self._create_attack('eternalblue_attempt', ip, event)
+
         # Log4j/JNDI injection
         if '${jndi:' in line.lower():
             return self._create_attack('log4j_attempt', ip, event)
+
+        # Spectre/Meltdown
+        if 'spectre' in line.lower() or 'meltdown' in line.lower():
+            return self._create_attack('spectre_meltdown', ip, event)
 
         return None
 
@@ -435,7 +465,8 @@ class AttackDetector:
         cutoff = now - timedelta(seconds=self.config.time_window_seconds)
 
         for tracker in [self.failed_attempts, self.web_attacks,
-                        self.db_attempts, self.email_attempts, self.ftp_attempts]:
+                        self.db_attempts, self.email_attempts, self.ftp_attempts,
+                        self.connection_rates]:
             for ip in list(tracker.keys()):
                 tracker[ip] = [ts for ts in tracker[ip] if ts > cutoff]
                 if not tracker[ip]:

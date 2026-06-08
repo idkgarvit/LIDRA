@@ -1,0 +1,72 @@
+x-base: &base
+  build:
+    context: .
+    target: production
+  networks:
+    - lidra-net
+  restart: unless-stopped
+
+services:
+  lidra-agent:
+    <<: *base
+    container_name: lidra-agent
+    ports:
+      - "8080:8080"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    volumes:
+      - lidra-data:/opt/lidra/data
+      - lidra-logs:/opt/lidra/logs
+      - lidra-state:/opt/lidra/state
+
+  vuln-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.vuln
+    container_name: lidra-vuln-server
+    ports:
+      - "8081:8081"
+    networks:
+      - lidra-net
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: lidra-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/alerting_rules.yml:/etc/prometheus/alerting_rules.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    networks:
+      - lidra-net
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: lidra-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - lidra-net
+    restart: unless-stopped
+
+networks:
+  lidra-net:
+    driver: bridge
+
+volumes:
+  lidra-data:
+  lidra-logs:
+  lidra-state:
+  prometheus-data:
+  grafana-data:

@@ -3,6 +3,8 @@ from textual.screen import Screen
 from textual.widgets import Header, Footer, DataTable
 from rich.text import Text
 
+from ..footer import CompactFooter
+
 STATE_COLORS = {
     "ESTABLISHED": "green",
     "SYN_SENT": "yellow",
@@ -15,9 +17,8 @@ STATE_COLORS = {
 
 class ConnectionsScreen(Screen):
     def compose(self) -> ComposeResult:
-        yield Header()
         yield DataTable(id="connections-table")
-        yield Footer()
+        yield CompactFooter()
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)

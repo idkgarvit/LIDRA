@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Optional, Callable, Dict, List
 from dataclasses import dataclass
 from collections import defaultdict
+from utils.config_loader import get_cfg
 
 logger = logging.getLogger("lidra.network.sniffer")
 
@@ -35,44 +36,6 @@ COMMON_PORTS = {
 }
 
 # Suspicious patterns — loaded from config with fallbacks
-_THRESHOLDS = None
-_SUSPICIOUS_PORTS = None
-
-
-def _get_thresholds():
-    global _THRESHOLDS
-    if _THRESHOLDS is not None:
-        return _THRESHOLDS
-    import yaml
-    from pathlib import Path
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    default = {"syn_flood": 50, "port_scan": 10, "icmp_flood": 50, "dns_query": 100}
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        _THRESHOLDS = cfg.get("thresholds", default)
-    if _THRESHOLDS is None:
-        _THRESHOLDS = default
-    return _THRESHOLDS
-
-
-def _get_suspicious_ports():
-    global _SUSPICIOUS_PORTS
-    if _SUSPICIOUS_PORTS is not None:
-        return _SUSPICIOUS_PORTS
-    import yaml
-    from pathlib import Path
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    default = [4444, 5555, 31337, 1337]
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        ports = cfg.get("suspicious_ports", [])
-        if ports:
-            _SUSPICIOUS_PORTS = ports
-    if _SUSPICIOUS_PORTS is None:
-        _SUSPICIOUS_PORTS = default
-    return _SUSPICIOUS_PORTS
 
 
 @dataclass
@@ -99,11 +62,31 @@ class PacketSniffer:
 
     def __init__(self, interface: str = None, callback: Optional[Callable] = None, config: dict = None):
         self.config = config or {}
-        self.interface = interface or self.config.get("collectors", {}).get("network", {}).get("interface", "eth0")
+        self._log = logging.getLogger(__name__)
+        if interface:
+            self.interface = interface
+        elif self.config.get("collectors", {}).get("network", {}).get("interface"):
+            self.interface = self.config["collectors"]["network"]["interface"]
+        else:
+            try:
+                from utils.interface import detect_interface
+                self.interface = detect_interface()
+                if not self.interface:
+                    raise RuntimeError("No network interface detected")
+            except Exception as e:
+                self._log.error(
+                    f"[PacketSniffer] Cannot detect network interface: {e}. "
+                    f"Set 'collectors.network.interface' in config.yaml or pass 'interface=' argument."
+                )
+                raise RuntimeError(
+                    f"PacketSniffer requires a network interface. Detection failed: {e}. "
+                    f"Configure it via 'collectors.network.interface' in config.yaml."
+                ) from e
         self.callback = callback
         self.running = False
         self.thread = None
         self.socket = None
+        self._lock = threading.Lock()
 
         # Statistics
         self.stats = {
@@ -116,9 +99,9 @@ class PacketSniffer:
         }
 
         # Attack tracking
-        self.syn_tracker = defaultdict(list)  # IP -> timestamps
-        self.port_scan_tracker = defaultdict(set)  # IP -> ports
-        self.dns_query_tracker = defaultdict(list)  # IP -> timestamps
+        self.syn_tracker: Dict[str, list] = defaultdict(list)
+        self.port_scan_tracker: Dict[str, set] = defaultdict(set)
+        self.dns_query_tracker: Dict[str, list] = defaultdict(list)
 
     def start(self):
         """Start packet capture."""
@@ -153,9 +136,12 @@ class PacketSniffer:
         self.running = False
         if self.socket:
             self.socket.close()
+            self.socket = None
         if self.thread:
             self.thread.join(timeout=2)
-        logger.info(f"Packet sniffer stopped. Stats: {self.stats}")
+        with self._lock:
+            stats = dict(self.stats)
+        logger.info(f"Packet sniffer stopped. Stats: {stats}")
 
     def _capture_loop(self):
         """Main capture loop."""
@@ -167,13 +153,15 @@ class PacketSniffer:
                 if data:
                     packet = self._parse_packet(data)
                     if packet:
-                        self.stats["packets_captured"] += 1
-                        self.stats["bytes_captured"] += len(data)
+                        with self._lock:
+                            self.stats["packets_captured"] += 1
+                            self.stats["bytes_captured"] += len(data)
 
                         # Analyze for attacks
                         attack = self._analyze_packet(packet)
                         if attack:
-                            self.stats["attacks_detected"] += 1
+                            with self._lock:
+                                self.stats["attacks_detected"] += 1
                             if self.callback:
                                 self.callback(attack)
 
@@ -215,16 +203,19 @@ class PacketSniffer:
                 if tcp_header[13] & 0x12: flags += "ACK"
                 if tcp_header[13] & 0x01: flags += "FIN"
                 if tcp_header[13] & 0x04: flags += "RST"
-                self.stats["tcp_packets"] += 1
+                with self._lock:
+                    self.stats["tcp_packets"] += 1
 
             elif protocol == IP_PROTO_UDP and len(data) > ihl + 8:
                 udp_header = data[ihl:ihl+8]
                 src_port = struct.unpack("!H", udp_header[0:2])[0]
                 dst_port = struct.unpack("!H", udp_header[2:4])[0]
-                self.stats["udp_packets"] += 1
+                with self._lock:
+                    self.stats["udp_packets"] += 1
 
             elif protocol == IP_PROTO_ICMP:
-                self.stats["icmp_packets"] += 1
+                with self._lock:
+                    self.stats["icmp_packets"] += 1
 
             return NetworkPacket(
                 timestamp=datetime.now(),
@@ -264,7 +255,7 @@ class PacketSniffer:
                 t for t in self.syn_tracker[packet.src_ip]
                 if now - t < 5  # Last 5 seconds
             ]
-            if len(self.syn_tracker[packet.src_ip]) > _get_thresholds().get("syn_flood", 50):
+            if len(self.syn_tracker[packet.src_ip]) > get_cfg("thresholds.syn_flood", 50):
                 attacks.append({
                     "type": "syn_flood",
                     "severity": "critical",
@@ -276,7 +267,7 @@ class PacketSniffer:
         # Port Scan Detection
         if packet.flags in ["SYN", None] and packet.dst_port > 0:
             self.port_scan_tracker[packet.src_ip].add(packet.dst_port)
-            if len(self.port_scan_tracker[packet.src_ip]) > _get_thresholds().get("port_scan", 10):
+            if len(self.port_scan_tracker[packet.src_ip]) > get_cfg("thresholds.port_scan", 10):
                 attacks.append({
                     "type": "port_scan",
                     "severity": "high",
@@ -293,7 +284,7 @@ class PacketSniffer:
                 t for t in self.dns_query_tracker[packet.src_ip]
                 if now - t < 10
             ]
-            if len(self.dns_query_tracker[packet.src_ip]) > _get_thresholds().get("icmp_flood", 50):
+            if len(self.dns_query_tracker[packet.src_ip]) > get_cfg("thresholds.icmp_flood", 50):
                 attacks.append({
                     "type": "icmp_flood",
                     "severity": "high",
@@ -302,7 +293,7 @@ class PacketSniffer:
                 })
 
         # Suspicious Port Access
-        if packet.dst_port in _get_suspicious_ports():
+        if packet.dst_port in get_cfg("suspicious_ports", [4444, 5555, 31337, 1337]):
             attacks.append({
                 "type": "suspicious_port",
                 "severity": "high",
@@ -328,7 +319,8 @@ class PacketSniffer:
 
     def get_stats(self) -> Dict:
         """Get sniffer statistics."""
-        return self.stats.copy()
+        with self._lock:
+            return self.stats.copy()
 
 
 def create_sniffer(interface: str = None, callback: Optional[Callable] = None, config: dict = None) -> PacketSniffer:

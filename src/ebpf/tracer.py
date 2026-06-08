@@ -4,28 +4,20 @@ Controls eBPF probe lifecycle and event collection
 """
 
 import os
-import sys
 import logging
 import threading
 import time
-import json
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Callable
 from dataclasses import dataclass, asdict
-import yaml
+from utils.config_loader import get_cfg
 
 logger = logging.getLogger(__name__)
 
 
 def _get_config_list(key, default):
-    cfg_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
-    try:
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        return cfg.get(key, default)
-    except Exception:
-        return default
+    return get_cfg(key, default)
 
 
 @dataclass
@@ -251,48 +243,73 @@ class EBPFTracer:
         from detection.log_parser import LogParser
         from detection.attack_detector import AttackDetector
         
-        log_sources = self.config.get('detection', {}).get('log_sources', 
-            ['/var/log/auth.log', '/var/log/syslog'])
+        if self.config.get('detection', {}).get('log_sources'):
+            log_sources = self.config['detection']['log_sources']
+        else:
+            log_sources = []
+            for p in ['/var/log/auth.log', '/var/log/syslog']:
+                if os.path.exists(p):
+                    log_sources.append(p)
+            if not log_sources:
+                import subprocess
+                try:
+                    result = subprocess.run(
+                        ['journalctl', '--no-pager', '-n', '0'],
+                        capture_output=True, timeout=5
+                    )
+                    if result.returncode == 0 or not result.stderr:
+                        log_sources = ['journalctl']
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    logger.warning("[Tracer] journalctl not available, trying syslog")
+                if not log_sources:
+                    log_sources = ['/var/log/syslog']
         
         self.fallback_parser = LogParser(log_sources)
         self.fallback_detector = AttackDetector()
+        self.fallback_threads = []
         
-        # Start monitoring thread
-        self._thread = threading.Thread(target=self._fallback_monitor, daemon=True)
-        self._thread.start()
+        # One thread per log source (each generator blocks forever)
+        for log_path in log_sources:
+            t = threading.Thread(
+                target=self._fallback_monitor_file,
+                args=(log_path,),
+                daemon=True
+            )
+            t.start()
+            self.fallback_threads.append(t)
         
-        logger.info("Fallback mode: log monitoring started")
+        self._thread = self.fallback_threads[0] if self.fallback_threads else None
+        
+        logger.info(f"Fallback mode: log monitoring started ({len(log_sources)} sources)")
     
     def _fallback_monitor(self):
-        """Fallback: monitor log files."""
-        while self.running:
-            try:
-                for log_path in self.fallback_parser.log_sources:
-                    for event in self.fallback_parser.get_live_events(log_path):
-                        # Pass to detector
-                        attacks = self.fallback_detector.analyze_event(event)
-                        
-                        for attack in attacks:
-                            # Convert to SecurityEvent format
-                            sec_event = SecurityEvent(
-                                timestamp=attack.timestamp,
-                                event_type=attack.attack_type,
-                                pid=0,
-                                uid=0,
-                                username=attack.details.get('username', ''),
-                                filename=attack.details.get('path', ''),
-                                dst_ip=attack.ip_address,
-                                raw_data={'attack': asdict(attack)}
-                            )
-                            
-                            # Notify callbacks
-                            for callback in self.callbacks:
-                                callback(sec_event)
-                                
-            except Exception as e:
-                logger.error(f"Fallback monitor error: {e}")
-            
-            time.sleep(1)
+        """Fallback: monitor log files (legacy single-source)."""
+        if self.fallback_parser.log_sources:
+            self._fallback_monitor_file(self.fallback_parser.log_sources[0])
+
+    def _fallback_monitor_file(self, log_path):
+        """Monitor a single log file."""
+        try:
+            for event in self.fallback_parser.get_live_events(log_path):
+                if not self.running:
+                    break
+                attacks = self.fallback_detector.analyze_event(event)
+                logger.debug(f"[Fallback] {log_path}: {event.log_type} from {event.ip_address} | attacks: {[a.attack_type for a in attacks]}")
+                for attack in attacks:
+                    sec_event = SecurityEvent(
+                        timestamp=attack.timestamp,
+                        event_type=attack.attack_type,
+                        pid=0,
+                        uid=0,
+                        username=attack.details.get('username', ''),
+                        filename=attack.details.get('path', ''),
+                        dst_ip=attack.ip_address,
+                        raw_data={'attack': asdict(attack)}
+                    )
+                    for callback in self.callbacks:
+                        callback(sec_event)
+        except Exception as e:
+            logger.error(f"Fallback monitor error for {log_path}: {e}")
     
     def stop(self):
         """Stop event collection and unload eBPF."""
