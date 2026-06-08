@@ -1,0 +1,422 @@
+[
+  {
+    "pcap": "clean.pcap",
+    "file_size_mb": 0.98,
+    "total_packets": 4956,
+    "parsed": {
+      "min": 4956,
+      "avg": 4956.0,
+      "max": 4956
+    },
+    "packets_with_detection": {
+      "min": 17,
+      "avg": 17.0,
+      "max": 17
+    },
+    "elapsed_sec": {
+      "min": 1.031,
+      "avg": 1.031,
+      "max": 1.031
+    },
+    "packets_per_second": {
+      "min": 4807.538,
+      "avg": 4807.538,
+      "max": 4807.538
+    },
+    "peak_rss_mb": {
+      "min": 1.445,
+      "avg": 1.445,
+      "max": 1.445
+    }
+  },
+  {
+    "pcap": "dnscat2.pcap",
+    "file_size_mb": 0.07,
+    "total_packets": 438,
+    "parsed": {
+      "min": 434,
+      "avg": 434.0,
+      "max": 434
+    },
+    "packets_with_detection": {
+      "min": 13,
+      "avg": 13.0,
+      "max": 13
+    },
+    "elapsed_sec": {
+      "min": 0.051,
+      "avg": 0.051,
+      "max": 0.051
+    },
+    "packets_per_second": {
+      "min": 8521.618,
+      "avg": 8521.618,
+      "max": 8521.618
+    },
+    "peak_rss_mb": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    }
+  },
+  {
+    "pcap": "iodine_dns_tunnel.pcap",
+    "file_size_mb": 28.81,
+    "total_packets": 41308,
+    "parsed": {
+      "min": 41308,
+      "avg": 41308.0,
+      "max": 41308
+    },
+    "packets_with_detection": {
+      "min": 64,
+      "avg": 64.0,
+      "max": 64
+    },
+    "elapsed_sec": {
+      "min": 40.849,
+      "avg": 40.849,
+      "max": 40.849
+    },
+    "packets_per_second": {
+      "min": 1011.241,
+      "avg": 1011.241,
+      "max": 1011.241
+    },
+    "peak_rss_mb": {
+      "min": 3.859,
+      "avg": 3.859,
+      "max": 3.859
+    }
+  },
+  {
+    "pcap": "syn_flood.pcap",
+    "file_size_mb": 0.27,
+    "total_packets": 5000,
+    "parsed": {
+      "min": 5000,
+      "avg": 5000.0,
+      "max": 5000
+    },
+    "packets_with_detection": {
+      "min": 3,
+      "avg": 3.0,
+      "max": 3
+    },
+    "elapsed_sec": {
+      "min": 4.43,
+      "avg": 4.43,
+      "max": 4.43
+    },
+    "packets_per_second": {
+      "min": 1128.677,
+      "avg": 1128.677,
+      "max": 1128.677
+    },
+    "peak_rss_mb": {
+      "min": 0.379,
+      "avg": 0.379,
+      "max": 0.379
+    }
+  },
+  {
+    "pcap": "dvwa-sqli-writeWebShell.pcap",
+    "file_size_mb": 0.0,
+    "total_packets": 11,
+    "parsed": {
+      "min": 11,
+      "avg": 11.0,
+      "max": 11
+    },
+    "packets_with_detection": {
+      "min": 2,
+      "avg": 2.0,
+      "max": 2
+    },
+    "elapsed_sec": {
+      "min": 0.002,
+      "avg": 0.002,
+      "max": 0.002
+    },
+    "packets_per_second": {
+      "min": 5289.097,
+      "avg": 5289.097,
+      "max": 5289.097
+    },
+    "peak_rss_mb": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    }
+  },
+  {
+    "pcap": "edited_test_with_sql.pcap",
+    "file_size_mb": 0.0,
+    "total_packets": 1,
+    "parsed": {
+      "min": 1,
+      "avg": 1.0,
+      "max": 1
+    },
+    "packets_with_detection": {
+      "min": 1,
+      "avg": 1.0,
+      "max": 1
+    },
+    "elapsed_sec": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    },
+    "packets_per_second": {
+      "min": 6274.943,
+      "avg": 6274.943,
+      "max": 6274.943
+    },
+    "peak_rss_mb": {
+      "min": 0.004,
+      "avg": 0.004,
+      "max": 0.004
+    }
+  },
+  {
+    "pcap": "shiro-cve-2016-4437.pcap",
+    "file_size_mb": 0.34,
+    "total_packets": 781,
+    "parsed": {
+      "min": 781,
+      "avg": 781.0,
+      "max": 781
+    },
+    "packets_with_detection": {
+      "min": 16,
+      "avg": 16.0,
+      "max": 16
+    },
+    "elapsed_sec": {
+      "min": 0.167,
+      "avg": 0.167,
+      "max": 0.167
+    },
+    "packets_per_second": {
+      "min": 4665.956,
+      "avg": 4665.956,
+      "max": 4665.956
+    },
+    "peak_rss_mb": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    }
+  },
+  {
+    "pcap": "test_with_sql.pcap",
+    "file_size_mb": 0.0,
+    "total_packets": 1,
+    "parsed": {
+      "min": 1,
+      "avg": 1.0,
+      "max": 1
+    },
+    "packets_with_detection": {
+      "min": 1,
+      "avg": 1.0,
+      "max": 1
+    },
+    "elapsed_sec": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    },
+    "packets_per_second": {
+      "min": 6075.74,
+      "avg": 6075.74,
+      "max": 6075.74
+    },
+    "peak_rss_mb": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    }
+  },
+  {
+    "pcap": "zentao-sqli.pcap",
+    "file_size_mb": 0.0,
+    "total_packets": 11,
+    "parsed": {
+      "min": 11,
+      "avg": 11.0,
+      "max": 11
+    },
+    "packets_with_detection": {
+      "min": 2,
+      "avg": 2.0,
+      "max": 2
+    },
+    "elapsed_sec": {
+      "min": 0.001,
+      "avg": 0.001,
+      "max": 0.001
+    },
+    "packets_per_second": {
+      "min": 10106.634,
+      "avg": 10106.634,
+      "max": 10106.634
+    },
+    "peak_rss_mb": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    }
+  },
+  {
+    "pcap": "fscan_mysql_bruteforce.pcap",
+    "file_size_mb": 0.28,
+    "total_packets": 3048,
+    "parsed": {
+      "min": 3048,
+      "avg": 3048.0,
+      "max": 3048
+    },
+    "packets_with_detection": {
+      "min": 16,
+      "avg": 16.0,
+      "max": 16
+    },
+    "elapsed_sec": {
+      "min": 0.967,
+      "avg": 0.967,
+      "max": 0.967
+    },
+    "packets_per_second": {
+      "min": 3152.724,
+      "avg": 3152.724,
+      "max": 3152.724
+    },
+    "peak_rss_mb": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    }
+  },
+  {
+    "pcap": "fscan_redis_bruteforce.pcap",
+    "file_size_mb": 0.03,
+    "total_packets": 324,
+    "parsed": {
+      "min": 324,
+      "avg": 324.0,
+      "max": 324
+    },
+    "packets_with_detection": {
+      "min": 12,
+      "avg": 12.0,
+      "max": 12
+    },
+    "elapsed_sec": {
+      "min": 0.026,
+      "avg": 0.026,
+      "max": 0.026
+    },
+    "packets_per_second": {
+      "min": 12492.028,
+      "avg": 12492.028,
+      "max": 12492.028
+    },
+    "peak_rss_mb": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    }
+  },
+  {
+    "pcap": "nbtscan.pcap",
+    "file_size_mb": 0.01,
+    "total_packets": 100,
+    "parsed": {
+      "min": 100,
+      "avg": 100.0,
+      "max": 100
+    },
+    "packets_with_detection": {
+      "min": 0,
+      "avg": 0.0,
+      "max": 0
+    },
+    "elapsed_sec": {
+      "min": 0.007,
+      "avg": 0.007,
+      "max": 0.007
+    },
+    "packets_per_second": {
+      "min": 13783.824,
+      "avg": 13783.824,
+      "max": 13783.824
+    },
+    "peak_rss_mb": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    }
+  },
+  {
+    "pcap": "nmap_syn_scan.pcap",
+    "file_size_mb": 0.14,
+    "total_packets": 2687,
+    "parsed": {
+      "min": 2687,
+      "avg": 2687.0,
+      "max": 2687
+    },
+    "packets_with_detection": {
+      "min": 11,
+      "avg": 11.0,
+      "max": 11
+    },
+    "elapsed_sec": {
+      "min": 1.137,
+      "avg": 1.137,
+      "max": 1.137
+    },
+    "packets_per_second": {
+      "min": 2363.965,
+      "avg": 2363.965,
+      "max": 2363.965
+    },
+    "peak_rss_mb": {
+      "min": 0.0,
+      "avg": 0.0,
+      "max": 0.0
+    }
+  },
+  {
+    "pcap": "web_traffic.pcap",
+    "file_size_mb": 0.09,
+    "total_packets": 1200,
+    "parsed": {
+      "min": 1200,
+      "avg": 1200.0,
+      "max": 1200
+    },
+    "packets_with_detection": {
+      "min": 10,
+      "avg": 10.0,
+      "max": 10
+    },
+    "elapsed_sec": {
+      "min": 0.102,
+      "avg": 0.102,
+      "max": 0.102
+    },
+    "packets_per_second": {
+      "min": 11799.841,
+      "avg": 11799.841,
+      "max": 11799.841
+    },
+    "peak_rss_mb": {
+      "min": 0.004,
+      "avg": 0.004,
+      "max": 0.004
+    }
+  }
+]
