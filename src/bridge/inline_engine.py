@@ -229,8 +229,8 @@ class InlineEngine:
             if brport.exists():
                 try:
                     bridge_iface = brport.resolve().name
-                except Exception:
-                    logger.debug(f"[InlineEngine] Could not resolve bridge for {cfg_iface}")
+                except Exception as e:
+                    logger.warning(f"[InlineEngine] Could not resolve bridge for {cfg_iface}: {e}")
             if not bridge_iface:
                 try:
                     import subprocess
@@ -330,7 +330,8 @@ class InlineEngine:
             proc.terminate()
             try:
                 proc.wait(timeout=5)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[InlineEngine] proc.wait timeout, killing: {e}")
                 proc.kill()
 
     def _run_raw_capture(self):
@@ -726,9 +727,10 @@ class InlineEngine:
                 try:
                     sock.bind((os.getpid() + port_attempt, 0))
                     break
-                except OSError:
+                except OSError as e:
                     if port_attempt == 4:
                         raise
+                    logger.debug(f"[InlineEngine] Bind attempt {port_attempt} failed: {e}")
                     continue
             # Clean up stale bindings: best-effort (no ACK), may fail on fresh boot
             try:
@@ -737,7 +739,7 @@ class InlineEngine:
                 self._nfq_send_config(sock, NFQNL_CFG_CMD_UNBIND, socket.AF_INET, queue_num,
                                       "UNBIND", request_ack=False)
             except Exception as e:
-                logger.debug(f"[InlineEngine] Stale NFQUEUE unbind skipped: {e}")
+                logger.warning(f"[InlineEngine] Stale NFQUEUE unbind skipped: {e}")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET, 0, "PF_BIND AF_INET")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET6, 0, "PF_BIND AF_INET6")
             self._nfq_send_config(sock, NFQNL_CFG_CMD_BIND, socket.AF_INET, queue_num, "BIND")
@@ -985,5 +987,6 @@ class InlineEngine:
             }
 
     def get_packet_rate(self) -> float:
-        elapsed = time.time() - self._start_time if self._start_time else 1
-        return self._packet_count / max(elapsed, 1)
+        with self._lock:
+            elapsed = time.time() - self._start_time if self._start_time else 1
+            return self._packet_count / max(elapsed, 1)

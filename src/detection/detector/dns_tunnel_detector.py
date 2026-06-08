@@ -191,7 +191,8 @@ class DNSTunnelDetector:
             if offset + 4 <= len(payload):
                 return struct.unpack(">H", payload[offset:offset + 2])[0]
             return 0
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[DNS-Tunnel] _extract_qtype failed: {e}")
             return 0
 
     @staticmethod
@@ -228,7 +229,8 @@ class DNSTunnelDetector:
                     return payload[offset:offset + rdlength]
                 offset += rdlength
             return None
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[DNS-Tunnel] _extract_answer failed: {e}")
             return None
 
     def _cleanup_if_needed(self):

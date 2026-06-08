@@ -40,18 +40,28 @@ class FirewallManager:
         self._config = config or {}
         nft_cfg = self._config.get("nftables", {})
         self.chain = nft_cfg.get("block_chain", "LIDRA_BLOCK")
+        self.NFT_TABLE = nft_cfg.get("table", "inet filter")
         self.NFT_BRIDGE_TABLE = nft_cfg.get("bridge_table", "lidra_bridge")
         self.NFT_BRIDGE_FORWARD_CHAIN = nft_cfg.get("bridge_forward_chain", "lidra_forward")
         self.NFT_BRIDGE_INPUT_CHAIN = nft_cfg.get("bridge_input_chain", "lidra_input")
         self._nft_lock = threading.Lock()
+        self._use_nft = False
+        if self.backend == "nftables" or (backend == "auto" and not self._has_iptables()):
+            if self._has_nftables():
+                self._use_nft = True
         if not dry_run:
             self._ensure_chain()
 
     def _ensure_chain(self):
-        """Create LIDRA chain if it doesn't exist; flush stale rules first."""
-        if not self._has_iptables():
-            logger.warning("iptables not available; skipping chain creation")
-            return
+        """Create LIDRA block chain if it doesn't exist; flush stale rules."""
+        if self._use_nft:
+            self._ensure_nft_chain()
+        elif self._has_iptables():
+            self._ensure_ipt_chain()
+        else:
+            logger.warning("No firewall backend available; skipping chain creation")
+
+    def _ensure_ipt_chain(self):
         try:
             check = subprocess.run(
                 ["iptables", "-L", self.chain, "-n"],
@@ -67,10 +77,30 @@ class FirewallManager:
         except Exception as e:
             logger.warning(f"Could not ensure iptables chain: {e}")
 
+    def _ensure_nft_chain(self):
+        table, family = (self.NFT_TABLE.split(None, 1) + ["inet"])[:2]
+        try:
+            result = self._run_nft(["list", "chain", family, table, self.chain], check=False)
+            if result.returncode == 0:
+                self._run_nft(["flush", "chain", family, table, self.chain])
+                logger.debug(f"Flushed nftables chain: {self.chain}")
+            else:
+                self._run_nft(["add", "chain", family, table, self.chain,
+                               '{ type filter hook input priority 0; policy accept; }'])
+                logger.info(f"Created nftables chain: {self.chain}")
+        except Exception as e:
+            logger.warning(f"Could not ensure nftables chain: {e}")
+
     @staticmethod
     def _has_iptables() -> bool:
         return subprocess.run(
             ["which", "iptables"], capture_output=True, check=False
+        ).returncode == 0
+
+    @staticmethod
+    def _has_nftables() -> bool:
+        return subprocess.run(
+            ["which", "nft"], capture_output=True, check=False
         ).returncode == 0
 
     def block_ip(self, ip: str, ttl_seconds: int = 3600) -> bool:
@@ -84,6 +114,11 @@ class FirewallManager:
             logger.info(f"[DRY-RUN] Would block {ip} for {ttl_seconds}s")
             return True
 
+        if self._use_nft:
+            return self._block_ip_nft(ip, ttl_seconds)
+        return self._block_ip_ipt(ip, ttl_seconds)
+
+    def _block_ip_ipt(self, ip: str, ttl_seconds: int) -> bool:
         try:
             check = subprocess.run(
                 ["iptables", "-C", self.chain, "-s", ip, "-j", "DROP"],
@@ -94,8 +129,7 @@ class FirewallManager:
                 return True
             subprocess.run(
                 ["iptables", "-A", self.chain, "-s", ip, "-j", "DROP"],
-                check=True,
-                capture_output=True
+                check=True, capture_output=True
             )
             self._schedule_unblock(ip, ttl_seconds)
             logger.info(f"Blocked {ip} for {ttl_seconds}s")
@@ -105,6 +139,18 @@ class FirewallManager:
             return False
         except Exception as e:
             logger.error(f"Firewall error for {ip}: {e}")
+            return False
+
+    def _block_ip_nft(self, ip: str, ttl_seconds: int) -> bool:
+        table, family = (self.NFT_TABLE.split(None, 1) + ["inet"])[:2]
+        try:
+            self._run_nft(["add", "rule", family, table, self.chain,
+                           f"ip saddr {ip} drop"])
+            self._schedule_unblock(ip, ttl_seconds)
+            logger.info(f"Blocked {ip} for {ttl_seconds}s (nftables)")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to block {ip} via nftables: {e}")
             return False
 
     def _schedule_unblock(self, ip: str, ttl_seconds: int):
@@ -118,15 +164,37 @@ class FirewallManager:
         except ValueError as e:
             logger.error(f"Refusing to unblock invalid IP: {e}")
             return
+        if self._use_nft:
+            self._unblock_ip_nft(ip)
+        else:
+            self._unblock_ip_ipt(ip)
+
+    def _unblock_ip_ipt(self, ip: str):
         try:
             subprocess.run(
                 ["iptables", "-D", self.chain, "-s", ip, "-j", "DROP"],
-                check=False,
-                capture_output=True
+                check=False, capture_output=True
             )
             logger.info(f"Unblocked {ip} (TTL expired)")
         except Exception as e:
             logger.error(f"Failed to unblock {ip}: {e}")
+
+    def _unblock_ip_nft(self, ip: str):
+        table, family = (self.NFT_TABLE.split(None, 1) + ["inet"])[:2]
+        try:
+            result = self._run_nft(["--handle", "list", "chain", family, table, self.chain],
+                                   check=True)
+            for line in result.stdout.split("\n"):
+                if ip in line and "drop" in line:
+                    m = re.search(r"handle\s+(\d+)", line)
+                    if m:
+                        self._run_nft(["delete", "rule", family, table, self.chain,
+                                       f"handle {m.group(1)}"])
+                        logger.info(f"Unblocked {ip} via nftables (TTL expired)")
+                        return
+            logger.debug(f"No nftables rule found for {ip}")
+        except Exception as e:
+            logger.error(f"Failed to unblock {ip} via nftables: {e}")
 
     def unblock_ip(self, ip: str) -> bool:
         """Manually unblock an IP."""
@@ -139,30 +207,42 @@ class FirewallManager:
             logger.info(f"[DRY-RUN] Would unblock {ip}")
             return True
 
-        try:
-            subprocess.run(
-                ["iptables", "-D", self.chain, "-s", ip, "-j", "DROP"],
-                check=False,
-                capture_output=True
-            )
-            logger.info(f"Manually unblocked {ip}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to unblock {ip}: {e}")
-            return False
+        if self._use_nft:
+            self._unblock_ip_nft(ip)
+        else:
+            try:
+                subprocess.run(
+                    ["iptables", "-D", self.chain, "-s", ip, "-j", "DROP"],
+                    check=False, capture_output=True
+                )
+                logger.info(f"Manually unblocked {ip}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to unblock {ip}: {e}")
+                return False
 
     def is_blocked(self, ip: str) -> bool:
         """Check if IP is currently blocked."""
         if self.dry_run:
             return False
 
+        if self._use_nft:
+            return self._is_blocked_nft(ip)
+
         try:
             result = subprocess.run(
                 ["iptables", "-L", self.chain, "-n", "--line-numbers"],
-                capture_output=True,
-                text=True,
-                check=False
+                capture_output=True, text=True, check=False
             )
+            return ip in result.stdout
+        except Exception:
+            return False
+
+    def _is_blocked_nft(self, ip: str) -> bool:
+        table, family = (self.NFT_TABLE.split(None, 1) + ["inet"])[:2]
+        try:
+            result = self._run_nft(["--handle", "list", "chain", family, table, self.chain],
+                                   check=True)
             return ip in result.stdout
         except Exception:
             return False
@@ -172,12 +252,13 @@ class FirewallManager:
         if self.dry_run:
             return []
 
+        if self._use_nft:
+            return self._list_blocks_nft()
+
         try:
             result = subprocess.run(
                 ["iptables", "-L", self.chain, "-n"],
-                capture_output=True,
-                text=True,
-                check=False
+                capture_output=True, text=True, check=False
             )
             blocked = []
             for line in result.stdout.split('\n'):
@@ -186,6 +267,21 @@ class FirewallManager:
                     for part in parts:
                         if self._is_ip(part):
                             blocked.append(part)
+            return blocked
+        except Exception:
+            return []
+
+    def _list_blocks_nft(self) -> List[str]:
+        table, family = (self.NFT_TABLE.split(None, 1) + ["inet"])[:2]
+        try:
+            result = self._run_nft(["--handle", "list", "chain", family, table, self.chain],
+                                   check=True)
+            blocked = []
+            for line in result.stdout.split("\n"):
+                if "drop" in line:
+                    m = re.search(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", line)
+                    if m:
+                        blocked.append(m.group(1))
             return blocked
         except Exception:
             return []
@@ -332,8 +428,8 @@ class FirewallManager:
                             ["iptables", "-D", "INPUT", line_num],
                             check=False, capture_output=True, timeout=5
                         )
-        except Exception:
-            logger.debug(f"[Firewall] Failed to flush NFQUEUE rules for queue {queue_num}")
+        except Exception as e:
+            logger.warning(f"[Firewall] Failed to flush NFQUEUE rules for queue {queue_num}: {e}")
 
     def local_block_ip(self, ip: str):
         if self.dry_run:
@@ -358,6 +454,6 @@ class FirewallManager:
                     m = re.search(r"handle\s+(\d+)", line)
                     if m:
                         return m.group(1)
-        except Exception:
-            logger.debug(f"[Firewall] Failed to find bridge rule for {ip}")
+        except Exception as e:
+            logger.warning(f"[Firewall] Failed to find bridge rule for {ip}: {e}")
         return None

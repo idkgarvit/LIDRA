@@ -52,7 +52,8 @@ try:
     from tui.data_provider import TUIDataProvider
     from tui.ipc_server import TUIIPCServer
     HAS_BRIDGE = True
-except ImportError:
+except ImportError as e:
+    logging.warning(f"[Agent] Bridge/TUI import failed: {e}")
     InlineEngine = None
     BridgeManager = None
     TUIDataProvider = None
@@ -273,7 +274,7 @@ class LIDRAv3:
         self.tracer.register_callback(self._on_security_event)
 
         self.firewall = FirewallManager(
-            backend='iptables',
+            backend=self.config.get('response', {}).get('firewall', 'iptables'),
             dry_run=_config_dry_run(self.config)
         )
         logger.info(f"[Firewall] dry_run={self.firewall.dry_run}")
@@ -897,8 +898,8 @@ class LIDRAv3:
                     for line in f:
                         if line.startswith("honeyfile:"):
                             last_processed = int(line.split(":")[1])
-            except (OSError, ValueError, IOError):
-                logger.debug("[Agent] No previous honeypot state file")
+            except (OSError, ValueError, IOError) as e:
+                logger.warning(f"[Agent] Could not read honeypot state file: {e}")
 
         conn = self.db._get_connection()
         cursor = conn.cursor()
@@ -972,7 +973,8 @@ class LIDRAv3:
                 self._tui_process.terminate()
                 try:
                     self._tui_process.wait(timeout=3)
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"[Agent] TUI subprocess not terminating, killing: {e}")
                     self._tui_process.kill()
                 logger.info("[TUI] Subprocess terminated")
             if self._tui_ipc_server:
@@ -1015,8 +1017,8 @@ def main():
             candidate.write_text(str(os.getpid()))
             try:
                 os.chmod(candidate, 0o644)
-            except OSError:
-                pass
+            except OSError as e:
+                logger.debug(f"PID file chmod failed: {e}")
             pid_path = candidate
             break
         except (PermissionError, OSError) as e:

@@ -1,7 +1,6 @@
 import logging
 import time
 from collections import defaultdict
-from datetime import datetime
 from typing import Dict, List, Optional, Set
 from utils.config_loader import get_cfg
 

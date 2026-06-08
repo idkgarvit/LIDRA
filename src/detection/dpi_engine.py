@@ -22,7 +22,8 @@ def _decode_utf7(m):
         raw += "=" * padding
         decoded = base64.b64decode(raw).decode("utf-16-be", errors="replace")
         return decoded
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[DPI] _decode_utf7 failed: {e}")
         return m.group(0)
 
 
@@ -192,7 +193,8 @@ class DPIEngine:
             if body_lines:
                 body = "\r\n".join(body_lines)
             return {"method": method, "uri": uri, "headers": headers, "body": body}
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[DPI] _parse_http failed: {e}")
             return None
 
     def _parse_dns(self, data: bytes) -> Optional[Dict]:
