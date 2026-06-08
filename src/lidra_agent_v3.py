@@ -86,6 +86,9 @@ def _config_dry_run(config: dict) -> bool:
     All FirewallManager constructors and action gates read this so the
     config and the firewall can never disagree.
     """
+    env = os.environ.get("LIDRA_DRY_RUN")
+    if env is not None:
+        return env in ("1", "true", "yes")
     return bool(config.get('response', {}).get('dry_run', True))
 
 
@@ -99,7 +102,7 @@ class LIDRAv3:
         self.running = False
         self.mode = config.get('mode', 'inline')
 
-        if config.get('general', {}).get('verbose', False):
+        if config.get('general', {}).get('verbose', False) or os.environ.get("LIDRA_LOG_LEVEL") == "DEBUG":
             logging.getLogger().setLevel(logging.DEBUG)
             logger.debug("[Config] Verbose logging enabled")
 

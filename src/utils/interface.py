@@ -13,11 +13,15 @@ def detect_interface(preferred: str = None) -> str:
     """Auto-detect the active network interface.
 
     Priority:
-      1. preferred argument (from config)
-      2. Default route interface (/proc/net/route)
-      3. First non-loopback interface (ioctl)
-      4. Raises RuntimeError if nothing found
+       1. LIDRA_INTERFACE env var (from CLI --interface flag)
+       2. preferred argument (from config)
+       3. Default route interface (/proc/net/route)
+       4. First non-loopback interface (ioctl)
+       5. Raises RuntimeError if nothing found
     """
+    env_iface = os.environ.get("LIDRA_INTERFACE")
+    if env_iface:
+        preferred = env_iface
     if preferred:
         if _interface_exists(preferred):
             return preferred
@@ -43,7 +47,7 @@ def _interface_exists(name: str) -> bool:
                 if line.strip().startswith(name + ":"):
                     return True
     except OSError:
-        pass
+        logger.debug(f"[Interface] /proc/net/dev not readable for {name}")
     try:
         import fcntl
         sck = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -52,6 +56,7 @@ def _interface_exists(name: str) -> bool:
         sck.close()
         return True
     except Exception:
+        logger.debug(f"[Interface] ioctl SIOCGIFADDR failed for {name}")
         return False
 
 
@@ -64,7 +69,7 @@ def _default_route_interface() -> str:
                 if len(parts) >= 4 and parts[1] == "00000000" and parts[3] == "0003":
                     return parts[0]
     except OSError:
-        pass
+        logger.debug("[Interface] /proc/net/route not readable")
     return None
 
 
@@ -89,5 +94,5 @@ def _first_non_loopback() -> str:
             if ifname and ifname != "lo":
                 return ifname
     except Exception:
-        pass
+        logger.debug("[Interface] ioctl SIOCGIFCONF failed")
     return None

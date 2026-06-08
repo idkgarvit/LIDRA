@@ -160,7 +160,33 @@ def main():
         help='Show this help'
     )
 
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Log all detections, never block'
+    )
+
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable DEBUG-level logging'
+    )
+
+    parser.add_argument(
+        '--interface', '-i',
+        type=str,
+        default=None,
+        help='Override auto-detected network interface'
+    )
+
     args = parser.parse_args()
+
+    if args.dry_run:
+        os.environ["LIDRA_DRY_RUN"] = "1"
+    if args.verbose:
+        os.environ["LIDRA_LOG_LEVEL"] = "DEBUG"
+    if args.interface:
+        os.environ["LIDRA_INTERFACE"] = args.interface
 
     if args.help and args.command == 'dashboard':
         console.print(Panel("""
