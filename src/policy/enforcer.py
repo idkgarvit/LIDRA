@@ -1,5 +1,4 @@
 import logging
-import re
 import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -134,6 +133,5 @@ class ZeroTrustEnforcer:
     def cleanup(self):
         if time.time() - self._last_cleanup > 300:
             with self._lock:
-                cutoff = time.time() - 3600
                 self._conn_counts = {k: v for k, v in self._conn_counts.items() if v > 0}
                 self._last_cleanup = time.time()

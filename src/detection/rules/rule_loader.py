@@ -7,9 +7,8 @@ Sigma-compatible format with LIDRA extensions.
 
 import re
 import logging
-import glob
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Any
 from dataclasses import dataclass
 import yaml
 

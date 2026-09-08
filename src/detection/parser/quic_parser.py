@@ -1,6 +1,6 @@
 import logging
 import struct
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 

@@ -3,7 +3,6 @@
 
 import requests
 import logging
-from typing import Optional
 from .notifier import AlertChannel, Alert
 
 logger = logging.getLogger(__name__)

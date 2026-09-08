@@ -1,0 +1,18 @@
+# LIDRA monitoring-sidecar override — hybrid layout.
+#
+# The agent itself runs bare-metal (systemd) so it can see real traffic, host
+# logs, and the host firewall. This file re-points Prometheus at the host
+# agent instead of the (blind, bridge-networked) agent container.
+#
+# Usage:
+#   sudo systemctl enable --now lidra          # agent on the host
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d prometheus grafana
+#   # Grafana: http://localhost:3000 (admin/admin)
+
+services:
+  prometheus:
+    volumes:
+      - ./config/prometheus.host.yml:/etc/prometheus/prometheus.yml:ro
+    # Resolve host.docker.internal on Linux (automatic on Docker Desktop).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

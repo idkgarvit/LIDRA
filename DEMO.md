@@ -12,14 +12,14 @@ Two terminals. Or one terminal + one tmux pane.
 ```bash
 # Terminal 1: clone the repo + start LIDRA TUI
 cd LIDRA
-sudo -E python3 -m src.lidra_agent_v3 --tui
+sudo -E python3 src/lidra_agent_v3.py --tui
 ```
 
 You should see the TUI dashboard with all green KPIs.
 The attackers table should be empty.
 
 ```bash
-# Terminal 2: start the vuln server (port 8080)
+# Terminal 2: start the vuln server (port 8081)
 cd LIDRA
 ./demo/run_all.sh
 ```
@@ -55,10 +55,10 @@ What `run_portscan_demo.sh` sends:
 
 | # | nmap command | Effect |
 |---|---|---|
-| 1 | `nmap -Pn -p 8080` | single-port probe, control |
+| 1 | `nmap -Pn -p 8081` | single-port probe, control |
 | 2 | `nmap -Pn -sS -p 1-1000` | full TCP SYN scan |
 | 3 | `nmap -Pn -sU --top-ports 20` | UDP scan |
-| 4 | `nmap -Pn -sV -p 8080` | service version detection |
+| 4 | `nmap -Pn -sV -p 8081` | service version detection |
 
 **What to say:**
 > "LIDRA is watching TCP SYN flags. A full port scan sends 1000 SYNs
@@ -141,7 +141,7 @@ sqlite3 data/lidra.db "DELETE FROM attacks WHERE src_ip = '127.0.0.1';"
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Connection refused` on /search | vuln_server not running | `python3 demo/vuln_server.py 8080 &` |
+| `Connection refused` on /search | vuln_server not running | `python3 demo/vuln_server.py 8081 &` |
 | TUI shows no alerts | LIDRA not seeing the traffic | Confirm TUI is on the same network segment as the demo traffic (use `lo` for local) |
 | Port scan not detected | nmap too slow (default) | Add `-T4 --max-retries 0` (already in the script) |
 | DNS tunnel demo does nothing | iodine not installed | `sudo apt install iodine` |

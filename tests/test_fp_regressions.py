@@ -277,7 +277,7 @@ class TestEndToEndFPImprovement:
 
     def test_web_traffic_fp_rate(self):
         from pathlib import Path
-        import dpkt
+        dpkt = pytest.importorskip("dpkt", reason="dpkt not installed (pip install -r requirements.txt)")
         engine = _make_engine()
         flagged = 0
         total = 0
@@ -296,7 +296,7 @@ class TestEndToEndFPImprovement:
 
     def test_dns_clean_fp_rate(self):
         from pathlib import Path
-        import dpkt
+        dpkt = pytest.importorskip("dpkt", reason="dpkt not installed (pip install -r requirements.txt)")
         engine = _make_engine()
         flagged = 0
         total = 0

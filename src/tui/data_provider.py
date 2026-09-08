@@ -75,6 +75,11 @@ class TUIDataProvider:
         self._db = db
         self._queue: asyncio.Queue = asyncio.Queue()
         self._start_time = time.time()
+        self._ipc_failed = False
+        try:
+            psutil.cpu_percent()  # prime: first real call always returns 0.0
+        except Exception:
+            pass
 
         # IPC mode: if engine not provided but socket exists
         self._socket_path = None
@@ -125,32 +130,39 @@ class TUIDataProvider:
 
     async def _ipc_events(self) -> AsyncGenerator[Dict, None]:
         """Connect to the engine's IPC server and receive real-time events."""
-        reader, writer = None, None
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        writer = None
         try:
-            sock.connect(self._socket_path)
-            sock.setblocking(False)
-            loop = asyncio.get_event_loop()
-            reader = asyncio.StreamReader()
-            protocol = asyncio.StreamReaderProtocol(reader)
-            transport, _ = await loop.create_connection(
-                lambda: protocol, sock=sock
-            )
-            writer = transport
+            # ponytail: raw transports have no drain() on 3.8+ — the old
+            # create_connection dance crashed every IPC stream. One call,
+            # proper StreamWriter.
+            reader, writer = await asyncio.open_unix_connection(
+                path=self._socket_path)
 
             # Subscribe to events
             writer.write(b'{"command": "SUBSCRIBE"}\n')
             await writer.drain()
 
+            import time as _time
+            last_poll = 0.0
+
+            async def _poll_snapshot():
+                nonlocal last_poll
+                writer.write(b'{"command": "SNAPSHOT"}\n')
+                await writer.drain()
+                last_poll = _time.monotonic()
+
+            await _poll_snapshot()
             while True:
                 try:
                     line = await asyncio.wait_for(reader.readline(), timeout=1.0)
                 except asyncio.TimeoutError:
-                    # Poll for snapshot periodically
-                    writer.write(b'{"command": "SNAPSHOT"}\n')
-                    await writer.drain()
+                    await _poll_snapshot()
                     yield {"type": "heartbeat", "data": {}}
                     continue
+                # ponytail: busy engines never hit the 1s idle timeout, so
+                # without this the panels starve on a live network.
+                if _time.monotonic() - last_poll > 5:
+                    await _poll_snapshot()
 
                 if not line:
                     break
@@ -169,10 +181,12 @@ class TUIDataProvider:
                     continue
 
         except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
-            # Fallback to mock if IPC fails
-            self.is_mock = True
-            async for ev in self._mock_events():
-                yield ev
+            # Agent unreachable: stay quiet, don't invent attacks.
+            self._ipc_failed = True
+            logger.warning("[TUI] IPC failed (%s) — showing offline, not mock", e)
+            while True:
+                await asyncio.sleep(1)
+                yield {"type": "heartbeat", "data": {}}
         finally:
             if writer:
                 try:
@@ -222,7 +236,22 @@ class TUIDataProvider:
         if self._mode == "ipc":
             if self._last_ipc_snapshot:
                 return self._last_ipc_snapshot
-            return self._mock_snapshot()
+            # ponytail: no fake attackers when the agent is unreachable —
+            # an honestly empty "offline" panel beats mock data masquerading
+            # as detections. Status bar surfaces system.mode == "offline".
+            return {
+                "stats": {"total_packets": 0, "total_attacks": 0, "uptime": "00:00:00"},
+                "top_attackers": [],
+                "connections": [],
+                "blocks": [],
+                "system": {"cpu_percent": 0.0, "memory_percent": 0.0,
+                           "bridge_status": "UNKNOWN", "mode": "offline",
+                           "interface": os.environ.get("LIDRA_INTERFACE", "eth0"),
+                           "environment": "ipc"},
+                "mitre": {},
+                "protocols": {},
+                "offline": True,
+            }
 
         engine_stats = self._engine.get_stats() if self._engine else {}
         uptime_s = int(time.time() - self._start_time)
@@ -235,7 +264,6 @@ class TUIDataProvider:
 
         active_blocks = blocklist.get_all() if blocklist else []
         top_talkers = rate_limiter.get_top_talkers(10) if rate_limiter else []
-        conn_stats = conn_tracker.get_stats() if conn_tracker else {}
         active_conns = conn_tracker.get_active_connections(50) if conn_tracker else []
 
         cpu = psutil.cpu_percent(interval=None)
@@ -244,10 +272,8 @@ class TUIDataProvider:
 
         attacker_countries = self._get_attacker_countries([r.ip for r in top_talkers]) if top_talkers else {}
 
-        protocols = {}
         try:
-            if hasattr(self, "get_protocol_breakdown"):
-                protocols = self.get_protocol_breakdown(60)
+            protocols = self.get_protocol_breakdown(60)
         except Exception:
             protocols = {}
 
@@ -266,15 +292,47 @@ class TUIDataProvider:
                 }
                 for r in top_talkers
             ],
-            "connections": active_conns,
+            # ponytail: raw Connection dataclasses killed json.dumps in
+            # the IPC server — every snapshot silently died server-side.
+            "connections": [
+                {
+                    "src_ip": c.src_ip, "src_port": c.src_port,
+                    "dst_ip": c.dst_ip, "dst_port": c.dst_port,
+                    "protocol": c.protocol, "state": c.state,
+                    "bytes": c.bytes_sent + c.bytes_recv,
+                    "duration": f"{max(0, c.last_seen - c.created):.0f}s",
+                }
+                for c in active_conns
+            ],
             "blocks": [
                 {"ip": b["ip"], "reason": b.get("reason", ""), "timestamp": b.get("expires_at", "")}
                 for b in active_blocks
             ],
-            "system": {"cpu_percent": cpu, "memory_percent": mem, "bridge_status": bridge_status},
+            "system": {"cpu_percent": cpu, "memory_percent": mem, "bridge_status": bridge_status,
+                         "interface": self._engine_interface(),
+                         "environment": "local",
+                         "mode": self._engine_mode()},
             "mitre": {},
             "protocols": protocols,
         }
+
+    def _engine_interface(self) -> str:
+        """Best-effort capture interface name for the status bar."""
+        try:
+            if self._engine is not None and hasattr(self._engine, "_get_interface"):
+                return str(self._engine._get_interface())
+        except Exception:
+            pass
+        return os.environ.get("LIDRA_INTERFACE", "eth0")
+
+    def _engine_mode(self) -> str:
+        """Wire truth: monitor (log-only) vs enforce (wire drops)."""
+        try:
+            if self._engine is not None and getattr(self._engine, "_monitor_only", True):
+                return "monitor"
+        except Exception:
+            pass
+        return "enforce"
 
     def _mock_snapshot(self) -> Dict:
         return {
@@ -292,8 +350,10 @@ class TUIDataProvider:
                 {"ip": f"185.12.3.{i}", "reason": "DDoS", "timestamp": "2026-05-30 10:00:00"}
                 for i in range(1, 4)
             ],
-            "system": {"cpu_percent": 12.5, "memory_percent": 34.2, "bridge_status": "UP"},
+            "system": {"cpu_percent": 12.5, "memory_percent": 34.2, "bridge_status": "UP",
+                         "interface": "eth0", "environment": "demo", "mode": "demo"},
             "mitre": {},
+            "protocols": {},
         }
 
     def on_block(self, ip: str):
@@ -448,7 +508,7 @@ class TUIDataProvider:
             out.append(
                 {
                     "ip": str(r["ip_address"]),
-                    "attack_count": int(r["attack_count"] or 0),
+                    "attacks": int(r["attack_count"] or 0),
                     "last_seen": str(r["last_seen"] or ""),
                     "severity": sev,
                     "country": str(r["country"] or "??"),

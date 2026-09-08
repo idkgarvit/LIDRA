@@ -117,7 +117,6 @@ class PortAnalyzer:
 
     def _check_service_mismatch(self, ip: str, dst_port: int, src_port: int, protocol: str) -> Optional[Dict]:
         if dst_port in _KNOWN_SERVICES:
-            expected_service = _KNOWN_SERVICES[dst_port]
             if protocol == "tcp" and src_port < 1024:
                 return {
                     "attack_type": "service_mismatch",

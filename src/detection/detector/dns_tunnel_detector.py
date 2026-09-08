@@ -1,11 +1,10 @@
 import logging
 import math
 import time
-import re
 import struct
 from collections import defaultdict
 from threading import Lock
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,6 @@ _TXT_SIZE_THRESHOLD = 512
 _ENTROPY_THRESHOLD = 4.0
 _NXDOMAIN_RATIO_THRESHOLD = 0.2
 _BEACON_WINDOW = 5.0
-_BEACON_TOLERANCE = 0.2
 
 
 class DNSTunnelDetector:

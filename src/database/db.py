@@ -5,16 +5,22 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+from utils.alert_throttle import AlertThrottle
 
 
 class LIDRADatabase:
     """Thread-safe SQLite database wrapper for LIDRA."""
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, record_dedupe_seconds: int = 60):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
+        # ponytail: one flood = thousands of identical rows (disk bloat, slow
+        # queries) while alerts were already throttled. Cooldown per
+        # (attacker, type) here — the one spot all record paths route through.
+        self._record_dedupe = AlertThrottle(cooldown_seconds=record_dedupe_seconds)
         self._init_schema()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -70,7 +76,10 @@ class LIDRADatabase:
         if row:
             cursor.execute(
                 "UPDATE attackers SET last_seen = ?, attack_count = attack_count + 1, country = COALESCE(?, country), org = COALESCE(?, org) WHERE id = ?",
-                (datetime.now().isoformat(), country, org, row['id'])
+                # ponytail: UTC, matching CURRENT_TIMESTAMP defaults elsewhere —
+                # local now() mixed IST rows into the same column and broke
+                # last_seen ordering.
+                (datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'), country, org, row['id'])
             )
             return row['id']
         else:
@@ -80,13 +89,26 @@ class LIDRADatabase:
             )
             return cursor.lastrowid
 
-    def record_attack(self, attacker_id: int, attack_type: str, source_log: str = None, raw_line: str = None):
-        """Record an attack event."""
+    # ponytail: threat_score was write-never (every attacker sat at 0, so any
+    # score-based response threshold was dead). Severity-weighted bump here —
+    # the one spot all record paths route through.
+    _SEVERITY_WEIGHT = {"low": 1, "medium": 3, "high": 10, "critical": 25}
+
+    def record_attack(self, attacker_id: int, attack_type: str, source_log: str = None,
+                      raw_line: str = None, severity: str = "medium", dedupe: bool = True):
+        """Record an attack event. Dup (attacker, type) hits inside the record
+        cooldown are skipped — pass dedupe=False for manual/demo inserts."""
+        if dedupe and not self._record_dedupe.allow(attack_type, attacker_id):
+            return
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO attacks (attacker_id, attack_type, source_log, raw_line) VALUES (?, ?, ?, ?)",
             (attacker_id, attack_type, source_log, raw_line)
+        )
+        cursor.execute(
+            "UPDATE attackers SET threat_score = MIN(100, threat_score + ?) WHERE id = ?",
+            (self._SEVERITY_WEIGHT.get((severity or "medium").lower(), 3), attacker_id)
         )
 
     def get_attackers(self, limit: int = 100, offset: int = 0) -> list:

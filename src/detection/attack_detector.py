@@ -203,8 +203,8 @@ class AttackDetector:
 
     def _load_config(self, config_path: Optional[str]) -> AttackConfig:
         return AttackConfig(
-            ssh_failed_attempts=get_cfg("thresholds.ssh_failed_attempts", 5),
-            time_window_seconds=get_cfg("thresholds.time_window_seconds", 300),
+            ssh_failed_attempts=get_cfg("detection.thresholds.ssh_failed_attempts", 5),
+            time_window_seconds=get_cfg("detection.thresholds.time_window_seconds", 300),
         )
 
     def analyze_event(self, event) -> List[DetectedAttack]:
@@ -334,7 +334,7 @@ class AttackDetector:
         self.connection_rates[ip].append(now)
 
         cutoff = now - timedelta(seconds=60)
-        recent = [ts for ts in self.connection_rates[ip] if ts > cutoff]
+        recent = [ts for ts in self.connection_rates[ip] if ts >= cutoff]
         self.connection_rates[ip] = recent
 
         if len(recent) > 20:
@@ -369,32 +369,38 @@ class AttackDetector:
 
     def _check_db_bruteforce(self, db_type: str, ip: str, event, now: datetime) -> Optional[DetectedAttack]:
         """Detect database brute force attacks."""
-        self.db_attempts[ip].append(now)
+        # ponytail: keyed by (db, ip) — a shared per-IP bucket misattributes
+        # cross-protocol failures (3 mysql + 2 postgres != postgres bruteforce)
+        key = (db_type, ip)
+        self.db_attempts[key].append(now)
 
-        if len(self.db_attempts[ip]) >= _get_brute_force_threshold():
-            self.db_attempts[ip] = []
+        attempts = len(self.db_attempts[key])
+        if attempts >= _get_brute_force_threshold():
+            self.db_attempts[key] = []
             return self._create_attack(
                 f'{db_type}_bruteforce', ip, event,
                 details={
                     'database': db_type,
                     'username': event.username,
-                    'attempt_count': 5
+                    'attempt_count': attempts
                 }
             )
         return None
 
     def _check_email_bruteforce(self, protocol: str, ip: str, event, now: datetime) -> Optional[DetectedAttack]:
         """Detect email service brute force attacks."""
-        self.email_attempts[ip].append(now)
+        key = (protocol, ip)
+        self.email_attempts[key].append(now)
 
-        if len(self.email_attempts[ip]) >= _get_brute_force_threshold():
-            self.email_attempts[ip] = []
+        attempts = len(self.email_attempts[key])
+        if attempts >= _get_brute_force_threshold():
+            self.email_attempts[key] = []
             return self._create_attack(
                 f'{protocol}_bruteforce', ip, event,
                 details={
                     'protocol': protocol,
                     'username': event.username,
-                    'attempt_count': 5
+                    'attempt_count': attempts
                 }
             )
         return None
@@ -403,13 +409,14 @@ class AttackDetector:
         """Detect FTP brute force attacks."""
         self.ftp_attempts[ip].append(now)
 
-        if len(self.ftp_attempts[ip]) >= _get_brute_force_threshold():
+        attempts = len(self.ftp_attempts[ip])
+        if attempts >= _get_brute_force_threshold():
             self.ftp_attempts[ip] = []
             return self._create_attack(
                 'ftp_bruteforce', ip, event,
                 details={
                     'username': event.username,
-                    'attempt_count': 5
+                    'attempt_count': attempts
                 }
             )
         return None
@@ -468,7 +475,7 @@ class AttackDetector:
                         self.db_attempts, self.email_attempts, self.ftp_attempts,
                         self.connection_rates]:
             for ip in list(tracker.keys()):
-                tracker[ip] = [ts for ts in tracker[ip] if ts > cutoff]
+                tracker[ip] = [ts for ts in tracker[ip] if ts >= cutoff]
                 if not tracker[ip]:
                     del tracker[ip]
 
@@ -477,7 +484,9 @@ class AttackDetector:
         key = f"{attack.attack_type}:{attack.ip_address}"
         last = self.last_alert.get(key)
 
-        if last is None or (datetime.now() - last).seconds > self.alert_cooldown:
+        # ponytail: total_seconds — .seconds drops the days component and
+        # wraps after 24h, suppressing alerts that should re-fire
+        if last is None or (datetime.now() - last).total_seconds() > self.alert_cooldown:
             self.last_alert[key] = datetime.now()
             return True
         return False

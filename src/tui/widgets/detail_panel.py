@@ -69,8 +69,7 @@ class DetailPanel(Static):
         self._refresh()
 
     def compose(self) -> ComposeResult:
-        return
-        yield  # noqa: unreachable — makes this a no-op generator
+        yield Static("", id="detail-content")
 
     def show_attacker(self, ip: str, detail: Optional[Dict] = None) -> None:
         self.current_ip = ip
@@ -126,10 +125,7 @@ class DetailPanel(Static):
         top_ports = d.get("top_ports", [])
         blocked = d.get("blocked", False)
 
-        if top_types:
-            top_type, top_count = top_types[0]
-        else:
-            top_type, top_count = ("unknown", 0)
+        top_type = top_types[0][0] if top_types else "unknown"
 
         action = self._suggest_action(top_type, attack_count)
         if attack_count >= 50:
@@ -179,13 +175,18 @@ class DetailPanel(Static):
         hint.append("[u]", style="bold")
         hint.append("nblock  ", style="default")
         hint.append("[esc]", style="bold")
-        hint.append(" clear", style="default")
+        hint.append(" back", style="default")
         rows.append(hint)
 
         return Group(*rows)
 
     def _refresh(self) -> None:
         try:
-            self.update(self._build_renderable())
+            content = self._build_renderable()
+            try:
+                self.query_one("#detail-content", Static).update(content)
+            except Exception:
+                # Fallback: update the widget itself
+                self.update(content)
         except Exception as e:
             logger.debug("DetailPanel refresh failed: %s", e)

@@ -13,7 +13,7 @@ Includes:
 """
 
 import logging
-from typing import Dict, Optional, List
+from typing import Dict, List
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -254,7 +254,6 @@ class AttackExplainer:
         
         # Build context variables
         details = detection.get('details', {})
-        event = context.get('event') if context else None
         threat_intel = context.get('threat_intel', {}) if context else {}
         
         vars = {
@@ -276,7 +275,6 @@ class AttackExplainer:
         lines = []
         
         # Title
-        title = template['what'].format(**vars)
         lines.append(f"## {template['title']}")
         lines.append("")
         
@@ -311,26 +309,3 @@ class AttackExplainer:
         
         return "\n".join(lines)
     
-    def explain_simple(self, detection: Dict) -> str:
-        """Simple one-line explanation."""
-        attack_type = detection.get('attack_type', 'unknown')
-        severity = detection.get('severity', 'medium').upper()
-        details = detection.get('details', {})
-        ip = details.get('dst_ip') or details.get('ip') or 'unknown'
-        
-        return f"[{severity}] {attack_type} from {ip}"
-    
-    def get_actions(self, attack_type: str) -> List[str]:
-        """Get recommended actions for an attack type."""
-        template = self.TEMPLATES.get(attack_type, self.TEMPLATES['unknown'])
-        return template.get('actions', [])
-    
-    def get_risk_level(self, attack_type: str) -> str:
-        """Get risk level for an attack type."""
-        template = self.TEMPLATES.get(attack_type, self.TEMPLATES['unknown'])
-        return template.get('risk', 'Unknown').split(' - ')[0]
-
-
-def create_explainer() -> AttackExplainer:
-    """Factory function."""
-    return AttackExplainer()

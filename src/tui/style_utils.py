@@ -45,5 +45,3 @@ def resolve(token: str, fallback: Optional[str] = None) -> str:
     return fallback if fallback is not None else token
 
 
-def resolve_many(*tokens: str) -> list[str]:
-    return [resolve(t) for t in tokens]

@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -19,8 +18,7 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Static
 
-from ..style_utils import resolve
-from ..themes import THEMES, current_tokens, severity_style
+from ..themes import THEMES
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +77,7 @@ def bind_tokens_provider(fn) -> None:
 
 
 def _arrow(value: int) -> str:
-    return "\u2191" if value >= 0 else "\u2193"
+    return "\u2191" if value > 0 else "\u00b7"
 
 
 class StatusBar(Static):
@@ -251,7 +249,9 @@ class StatusBar(Static):
             "status-mode": "mode",
             "status-rate": "rate",
             "status-attacks": "attacks",
+            "status-critical": "critical",
             "status-blocked": "blocked",
+            "status-top": "top",
             "status-clock": "clock",
         }
         area = area_map.get(widget_id)

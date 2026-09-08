@@ -51,6 +51,10 @@ class TUIIPCServer:
 
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server_sock.bind(self._socket_path)
+        # ponytail: agent runs as root, TUI as the user — without this the
+        # TUI silently falls back to mock data and shows fake attackers.
+        # Local single-user tool; restrict the dir if multi-user matters.
+        os.chmod(self._socket_path, 0o666)
         self._server_sock.listen(5)
         self._server_sock.settimeout(1.0)
         self._running = True

@@ -1,9 +1,7 @@
 import time
 import logging
-from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime
-from threading import Lock
+from dataclasses import dataclass
+from threading import RLock
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -22,7 +20,7 @@ class RateInfo:
 
 class RateLimiter:
     def __init__(self, config: dict):
-        self._lock = Lock()
+        self._lock = RLock()
         self._windows: Dict[str, RateInfo] = {}
         self._config = config
         self._packets_per_sec = config.get("packets_per_sec", 1000)
@@ -33,6 +31,9 @@ class RateLimiter:
     def check(self, ip: str, packet_type: str = "", byte_count: int = 0) -> Tuple[bool, RateInfo]:
         now = time.time()
         with self._lock:
+            # ponytail: opportunistic sweep, full LRU if this ever shows in profiles
+            if len(self._windows) > 10000:
+                self.cleanup_stale(self._window_seconds)
             info = self._windows.get(ip)
             if not info:
                 info = RateInfo(ip=ip, window_start=now, last_packet=now)

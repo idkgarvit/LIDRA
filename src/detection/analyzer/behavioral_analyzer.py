@@ -11,7 +11,6 @@ class BehavioralAnalyzer:
     def __init__(self):
         self._syn_rates: Dict[str, deque] = defaultdict(lambda: deque(maxlen=60))
         self._packet_rates: Dict[str, deque] = defaultdict(lambda: deque(maxlen=120))
-        self._payload_sizes: Dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
         self._protocol_use: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._conn_durations: Dict[str, deque] = defaultdict(lambda: deque(maxlen=30))
         self._conn_open: Dict[str, float] = {}
@@ -29,7 +28,6 @@ class BehavioralAnalyzer:
         dst_ip = packet.get("dst_ip", "")
         dst_port = packet.get("dst_port", 0)
         flags = packet.get("flags", "")
-        protocol = packet.get("protocol", "")
 
         # Skip broadcast/multicast/DHCP traffic to avoid FP
         if dst_ip.startswith("255.") or dst_ip.startswith("224.") or dst_ip.startswith("239."):
@@ -115,7 +113,7 @@ class BehavioralAnalyzer:
                 "attack_type": "slow_drip",
                 "severity": "medium",
                 "source_ip": ip,
-                "details": f"1-byte PUSH payload (slow loris/drip attack)",
+                "details": "1-byte PUSH payload (slow loris/drip attack)",
             }
         return None
 
@@ -158,7 +156,6 @@ class BehavioralAnalyzer:
         if time.time() - self._last_cleanup > 120:
             self._syn_rates.clear()
             self._packet_rates.clear()
-            self._payload_sizes.clear()
             self._protocol_use.clear()
             self._conn_durations.clear()
             self._conn_open.clear()

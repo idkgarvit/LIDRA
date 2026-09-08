@@ -14,9 +14,9 @@ from typing import ClassVar, List, Tuple
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical, VerticalScroll
+from textual.containers import Container, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.widgets import DataTable, Static
 
 from ..style_utils import resolve
 
@@ -41,12 +41,9 @@ SECTIONS: Tuple[HelpSection, ...] = (
         title="Navigation",
         entries=(
             HelpEntry("1", "Dashboard", "Open the main dashboard view."),
-            HelpEntry("2", "Connections", "Open the live connections table."),
             HelpEntry("3", "Config", "Open engine and bridge configuration."),
             HelpEntry("Tab", "Cycle focus", "Move focus to the next widget."),
             HelpEntry("Shift+Tab", "Cycle focus back", "Move focus to the previous widget."),
-            HelpEntry("g", "Top", "Jump to the first row in any table."),
-            HelpEntry("G", "Bottom", "Jump to the last row in any table."),
         ),
     ),
     HelpSection(
@@ -65,7 +62,6 @@ SECTIONS: Tuple[HelpSection, ...] = (
         entries=(
             HelpEntry("/", "Search", "Filter rows by IP, country or attack type."),
             HelpEntry("f", "Cycle severity", "Cycle severity filter: all \u2192 critical+ \u2192 high+."),
-            HelpEntry("p", "Cycle protocol", "Cycle protocol filter: all \u2192 http \u2192 dns \u2192 tls."),
             HelpEntry("Esc", "Clear filter", "Reset active filters and search."),
         ),
     ),

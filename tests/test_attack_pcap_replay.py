@@ -27,8 +27,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import dpkt
 import pytest
+dpkt = pytest.importorskip("dpkt", reason="dpkt not installed (pip install -r requirements.txt)")
 import yaml
 
 # Add src/ to path so we can import LIDRA modules

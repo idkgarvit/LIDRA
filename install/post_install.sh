@@ -153,12 +153,38 @@ log "Installing Python dependencies from $PREFIX/requirements.txt"
 "$VENV_DIR/bin/pip" install -r "$PREFIX/requirements.txt"
 ok "Python dependencies installed."
 
+# ----- optional XDP build (fast-path bonus; core works without it) -----
+# The agent detects + blocks via iptables/nftables with zero extra toolchain.
+# XDP only needs clang + kernel headers + make; skip quietly if absent.
+if [ "${LIDRA_NO_XDP:-}" != "" ]; then
+    log "Skipping XDP build (LIDRA_NO_XDP set)."
+elif ! has_pkg clang || ! has_pkg make; then
+    warn "clang/make not found — skipping XDP build (optional)."
+    warn "Core detection + firewall blocking work without it."
+    warn "To enable XDP later: install clang + kernel headers, then run:  make -C $PREFIX build"
+elif ! make -C "$PREFIX" build >/tmp/lidra-xdp-build.log 2>&1; then
+    warn "XDP build failed — continuing without it (core protection unaffected)."
+    warn "See /tmp/lidra-xdp-build.log for details."
+else
+    ok "XDP program built."
+fi
+
 # ----- systemd unit -----
 if [ "${LIDRA_NO_SERVICE:-}" = "" ] && [ -f "$SERVICE_FILE_SRC" ] && [ -d /etc/systemd/system ]; then
     log "Installing systemd unit to $SERVICE_FILE_DST"
     install -m 0644 "$SERVICE_FILE_SRC" "$SERVICE_FILE_DST"
+    # Resume hook: restart agent after suspend (lid close) — capture sockets go stale.
+    if [ -f "$SCRIPT_DIR/systemd/lidra-sleep" ] && [ -d /usr/lib/systemd/system-sleep ]; then
+        install -m 0755 "$SCRIPT_DIR/systemd/lidra-sleep" /usr/lib/systemd/system-sleep/lidra
+        ok "Suspend/resume hook installed."
+    fi
     systemctl daemon-reload
-    ok "systemd unit installed. Enable with:  systemctl enable --now lidra"
+    if [ "${LIDRA_NO_ENABLE:-}" = "" ]; then
+        systemctl enable --now lidra
+        ok "Service enabled and started (auto-boots from now on)."
+    else
+        ok "systemd unit installed. Enable with:  systemctl enable --now lidra"
+    fi
 elif [ "${LIDRA_NO_SERVICE:-}" = "" ]; then
     warn "systemd not detected or service file missing — skipping unit install."
     if [ ! -f "$SERVICE_FILE_SRC" ]; then

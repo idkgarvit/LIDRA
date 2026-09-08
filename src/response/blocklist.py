@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta
-from threading import Lock
-from typing import Dict, List, Optional, Set, Tuple
+from threading import RLock
+from typing import Dict, List, Set
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ class Blocklist:
         self._blocked: Set[str] = set()
         self._ttl: Dict[str, datetime] = {}
         self._reasons: Dict[str, str] = {}
-        self._lock = Lock()
+        self._lock = RLock()
 
     def is_blocked(self, ip: str) -> bool:
         with self._lock:
@@ -43,6 +43,16 @@ class Blocklist:
             self._ttl.pop(ip, None)
             self._reasons.pop(ip, None)
             logger.info(f"[Blocklist] Unblocked {ip}")
+            if self._db:
+                try:
+                    conn = self._db._get_connection()
+                    conn.execute(
+                        "UPDATE blocks SET applied = 0 WHERE ip_address = ? AND applied = 1",
+                        (ip,),
+                    )
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Failed to persist unblock: {e}")
 
     def get_all(self) -> List[Dict]:
         with self._lock:

@@ -1,12 +1,11 @@
 import json
 import logging
-import os
 import socket
 import ssl
 import threading
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 

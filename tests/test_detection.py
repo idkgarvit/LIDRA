@@ -1,7 +1,6 @@
 # tests/test_detection.py
 """Tests for LIDRA detection engine."""
 
-import pytest
 from pathlib import Path
 import sys
 from datetime import datetime, timedelta

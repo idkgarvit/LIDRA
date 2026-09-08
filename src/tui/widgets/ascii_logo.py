@@ -8,10 +8,8 @@ of cyan-to-green coloring via Rich's ``Text``. The widget is a plain
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 from rich.text import Text
-from textual.app import ComposeResult
 from textual.widgets import Static
 
 logger = logging.getLogger(__name__)

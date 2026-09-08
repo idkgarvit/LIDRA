@@ -8,8 +8,7 @@ upper-cased severity label and is colored according to ``themes``.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import ClassVar, Dict, Optional
+from typing import ClassVar, Dict
 
 from rich.text import Text
 from textual.widgets import Static

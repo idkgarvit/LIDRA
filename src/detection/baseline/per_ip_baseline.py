@@ -48,20 +48,18 @@ class PerIPBaseline:
         self._config = config or {}
         self._pps: Dict[str, WelfordOnline] = defaultdict(WelfordOnline)
         self._bps: Dict[str, WelfordOnline] = defaultdict(WelfordOnline)
-        self._cpm: Dict[str, WelfordOnline] = defaultdict(WelfordOnline)
         self._protocol_dist: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._hour_activity: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
         self._window_pps: Dict[str, List[Tuple[float, int, int]]] = defaultdict(list)
+        self._last_eval: Dict[str, float] = {}
         self._lock = Lock()
         self._last_cleanup = time.time()
         self._last_hour = -1
-        self._adaptive_rate = config.get("adaptive_rate", 0.05) if config else 0.05
         self._z_threshold = config.get("z_threshold", 3.0) if config else 3.0
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
         self._cleanup_if_needed()
         src_ip = packet.get("src_ip", "")
-        dst_ip = packet.get("dst_ip", "")
         protocol = packet.get("protocol", "")
         plen = len(packet.get("payload", b"")) + 40
         now = time.time()
@@ -76,6 +74,13 @@ class PerIPBaseline:
             self._hour_activity[src_ip][hour] += 1
             self._protocol_dist[src_ip][protocol] += 1
             self._window_pps[src_ip].append((now, plen, 1))
+
+            # ponytail: track every packet O(1), but rescan the 60s window at
+            # most every 5s per IP — under flood the window holds 10k+ entries
+            # and a full scan per packet would burn the capture core.
+            if now - self._last_eval.get(src_ip, 0) < 5:
+                return None
+            self._last_eval[src_ip] = now
 
             recent = [(t, b, c) for t, b, c in self._window_pps[src_ip] if now - t < 60]
             self._window_pps[src_ip] = recent
@@ -107,7 +112,6 @@ class PerIPBaseline:
                     })
 
                 if self._pps[src_ip].n < 50 or abs(pps_z) < self._z_threshold:
-                    lr = self._adaptive_rate / (1 + abs(pps_z)) if abs(pps_z) > 1 else self._adaptive_rate
                     self._pps[src_ip].update(window_pps)
                     self._bps[src_ip].update(window_bps)
 
@@ -138,9 +142,9 @@ class PerIPBaseline:
                 stale = [k for k, v in self._window_pps.items() if not v or v[-1][0] < cutoff]
                 for k in stale:
                     del self._window_pps[k]
+                    self._last_eval.pop(k, None)
                     del self._pps[k]
                     del self._bps[k]
-                    del self._cpm[k]
                     if k in self._protocol_dist:
                         del self._protocol_dist[k]
                     if k in self._hour_activity:

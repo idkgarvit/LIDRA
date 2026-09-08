@@ -39,6 +39,16 @@ ENV/
 *.local.yaml
 
 # Runtime state (active DB / logs are kept; WAL is transient)
-data/*.db-shm
-data/*.db-wal
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+logs/
+state/
 *.pid
+*.sock
+
+# eBPF build artifacts (rebuild via make build)
+src/ebpf/*.o
+src/ebpf/xdp_loader
+*.bpf.o

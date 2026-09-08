@@ -124,10 +124,3 @@ class AttackerTable(Static):
         def __init__(self, row: AttackerRow) -> None:
             super().__init__()
             self.row = row
-
-    class ContextMenuRequested(Message):
-        def __init__(self, row: AttackerRow, x: int, y: int) -> None:
-            super().__init__()
-            self.row = row
-            self.x = x
-            self.y = y

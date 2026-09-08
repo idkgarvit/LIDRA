@@ -6,13 +6,6 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_KNOWN_TTLS = {
-    32: "Windows",
-    64: "Linux/BSD/macOS",
-    128: "Windows",
-    255: "Solaris/AIX",
-}
-
 _INVALID_FLAGS = [
     "FS", "FR", "SR",
 ]
@@ -23,7 +16,6 @@ class TCPFingerprinter:
         self._source_ttls: Dict[str, List[int]] = defaultdict(list)
         self._source_isns: Dict[str, List[int]] = defaultdict(list)
         self._source_ips: Dict[str, int] = defaultdict(int)
-        self._source_ww: Dict[str, List[int]] = defaultdict(list)
         self._last_cleanup = time.time()
         self._lock = Lock()
 
@@ -75,8 +67,6 @@ class TCPFingerprinter:
                     "source_ip": "",
                     "details": f"Invalid flag combo: {flags} (possible scan/spoof)",
                 }
-        if "S" in flags and "A" not in flags and 0:
-            pass
         return None
 
     def _check_ttl_jitter(self, ip: str, ttl: int) -> Optional[Dict]:
@@ -149,5 +139,4 @@ class TCPFingerprinter:
             self._source_ttls.clear()
             self._source_isns.clear()
             self._source_ips.clear()
-            self._source_ww.clear()
             self._last_cleanup = time.time()

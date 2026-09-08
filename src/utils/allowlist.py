@@ -184,10 +184,15 @@ def reset_allowlist() -> None:
     _global_allowlist = None
 
 
+# ponytail: port_scan/timing_evasion from RFC1918 is the LAN-recon signal,
+# not noise — suppressing it blinded all insider testing. Private nets only
+# skip true noise (broadcasts); CDN ranges keep the full noisy set.
 NOISY_PACKET_ATTACKS = {
     "broadcast_storm", "timing_evasion", "port_scan",
     "session_correlated_sql_attack", "session_correlated_cmd_attack",
 }
+
+PRIVATE_NOISY_ATTACKS = {"broadcast_storm"}
 
 
 def should_suppress(ip: str, attack_type: str, config: Optional[dict] = None) -> tuple[bool, str]:
@@ -197,6 +202,6 @@ def should_suppress(ip: str, attack_type: str, config: Optional[dict] = None) ->
         return False, ""
     if reason in ("cloudflare", "google", "aws") and attack_type in NOISY_PACKET_ATTACKS:
         return True, reason
-    if reason == "private" and attack_type in NOISY_PACKET_ATTACKS:
+    if reason == "private" and attack_type in PRIVATE_NOISY_ATTACKS:
         return True, reason
     return False, ""

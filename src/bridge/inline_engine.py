@@ -1,10 +1,10 @@
+import ipaddress
 import logging
 import time
 import threading
 import struct
 import socket
 import subprocess
-import fcntl
 import os
 import sys
 from pathlib import Path
@@ -36,6 +36,7 @@ NFQNL_COPY_META = 1
 NFQNL_COPY_PACKET = 2
 NFQA_CFG_CMD = 1
 NFQA_CFG_PARAMS = 2
+NFQA_CFG_QUEUE_MAXLEN = 4
 NFQA_PACKET_HDR = 1
 NFQA_PAYLOAD = 10
 NFQA_VERDICT_HDR = 2
@@ -47,11 +48,13 @@ NLMSG_DONE = 3
 NLM_F_REQUEST = 1
 NLM_F_ACK = 4
 
+from utils.interface import local_ips
 from response.verdict import Verdict, decide_verdict
 from response.blocklist import Blocklist
 from response.rate_limiter import RateLimiter
 from detection.packet_analyzer import PacketAnalyzer
 from bridge.connection_tracker import ConnectionTracker
+from bridge.forensics import ForensicRecorder
 from bridge.stream_reassembler import StreamReassembler
 from detection.dpi_engine import DPIEngine
 
@@ -68,6 +71,17 @@ class InlineEngine:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._queue_num = config.get("local", {}).get("nfqueue_num") or config.get("bridge", {}).get("nfqueue_num") or 0
+        local_cfg = config.get("local", {}) or {}
+        self._local_inline = bool(local_cfg.get("inline", False))
+        # ponytail: monitor_only defaults True — installing a queue rule must
+        # never silently start dropping; enforce needs explicit opt-in.
+        self._monitor_only = bool(local_cfg.get("monitor_only", True))
+        self._queue_maxlen = int((config.get("bridge", {}) or {}).get("nfqueue_maxlen")
+                                 or local_cfg.get("nfqueue_maxlen") or 1024)
+        self._nfqueue_family = "inet"  # recorded by _setup_nfqueue_nft; teardown removes the same family
+        self._ct_time = 0.0
+        self._ct_solicited = set()  # conntrack-backed solicited keys, 1s refresh
+        self._own_time = 0.0  # own-IP refresh (v6 privacy extensions rotate)
 
         inline_cfg = config.get("inline", {})
         rate_cfg = inline_cfg.get("rate_limiting", {})
@@ -103,21 +117,36 @@ class InlineEngine:
         self._timing_analyzer = TimingAnalyzer()
         self._proxy_detector = ProxyDetector()
 
+        # ponytail: our own egress is not an attack — without this the
+        # sensor flags its own DNS/HTTPS (e.g. 8.8.8.8: 1000+ bogus rows).
+        self._own_ips = local_ips()
+        # ponytail: flows WE solicited (DNS query out, HTTPS out) — replies
+        # on them skip content inspection (DPI/session), else every CDN page
+        # scores its server as an attacker. Rate/shape detectors still run.
+        self._solicited: Dict[str, float] = {}
         self._packet_count = 0
         self._pass_count = 0
         self._drop_count = 0
         self._rate_limit_count = 0
         self._total_latency = 0.0
+        # ponytail: per-hit log cooldown — the MONITOR/DETECTED pair at
+        # 400+/sec (disk) stalled the verdict loop and held queued packets
+        # hostage. Cooldown gates the repeat log line only; counters, DB,
+        # and verdicts still record every hit.
+        self._hit_log_at: Dict[str, float] = {}
+        self._hit_log_cooldown = 5.0
         self._start_time = 0.0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         from detection.analyzer.tcp_fingerprinter import TCPFingerprinter
         from detection.analyzer.behavioral_analyzer import BehavioralAnalyzer
         from detection.analyzer.session_correlator import SessionCorrelator
+        from detection.baseline.per_ip_baseline import PerIPBaseline
         from utils.bloom import BloomFilter, FlowCache
         self._tcp_fingerprinter = TCPFingerprinter()
         self._behavioral_analyzer = BehavioralAnalyzer()
         self._session_correlator = SessionCorrelator()
+        self._per_ip_baseline = PerIPBaseline(inline_cfg.get("baseline", {}))
         bf_cfg = config.get("inline", {}).get("bloom", {})
         self._bloom_filter = BloomFilter(capacity=bf_cfg.get("capacity", 50000), error_rate=bf_cfg.get("error_rate", 0.001))
         fc_cfg = config.get("inline", {}).get("flow_cache", {})
@@ -126,6 +155,7 @@ class InlineEngine:
             clean_threshold=fc_cfg.get("clean_threshold", 15)
         )
 
+        self._recorder = ForensicRecorder(config)
         self._on_detection_callback: Optional[Callable] = None
         self._pipeline_order = ["blocklist", "header_analysis", "stream_reassembly", "dpi", "verdict"]
         self._criteria_packets = 0
@@ -164,16 +194,23 @@ class InlineEngine:
 
     def _run_loop(self):
         mode = self._config.get("mode", "local")
-        # NFQUEUE requires nftables INPUT rules that break WiFi on Kali.
-        # Only use NFQUEUE in bridge/gateway mode (separate-box deployment).
-        # In local mode, skip straight to AF_PACKET.
-        if mode != "local":
+        # Local inline (laptop): NFQUEUE on the INPUT hook drops inbound attacks
+        # before the app — opt-in via local.inline (installer asks). Queue rule
+        # uses bypass, so a dead engine fails open; AF_PACKET stays fallback.
+        if mode != "local" or self._local_inline:
             # Attempt 1: NFQUEUE — true inline verdicts (DROP before delivery).
-            try:
-                self._run_nfqueue_capture()
-                return
-            except Exception as e:
-                logger.warning(f"[InlineEngine] NFQUEUE unavailable ({e}); trying AF_PACKET")
+            # ponytail: retry BIND 3x — restart races (old consumer draining)
+            # fail it once; don't degrade to sniff-only on a transient.
+            for attempt in range(3):
+                try:
+                    self._run_nfqueue_capture()
+                    return
+                except Exception as e:
+                    if attempt == 2:
+                        logger.warning(f"[InlineEngine] NFQUEUE unavailable ({e}); trying AF_PACKET")
+                    else:
+                        logger.info(f"[InlineEngine] NFQUEUE bind try {attempt + 1}/3 failed ({e}); retrying")
+                        time.sleep(2)
 
         # Attempt 2: AF_PACKET raw socket — works on ALL Linux distros.
         # No kernel modules, no WiFi breakage. Detection works, blocking
@@ -304,7 +341,7 @@ class InlineEngine:
                         pkt_batch_count += 1
 
                     detections = self._run_detection_pipeline(packet)
-                    verdict = decide_verdict(detections)
+                    verdict = self._decide(packet, detections)
                     self._apply_verdict(0, verdict, packet, detections, time.time())
 
                     now = time.time()
@@ -397,7 +434,7 @@ class InlineEngine:
                 detections = self._run_detection_pipeline(packet)
                 if not detections or not isinstance(detections, list):
                     detections = []
-                verdict = decide_verdict(detections)
+                verdict = self._decide(packet, detections)
                 self._apply_verdict(0, verdict, packet, detections, time.time())
             except Exception as e:
                 logger.warning(f"[InlineEngine] Packet processing error: {e}")
@@ -421,25 +458,171 @@ class InlineEngine:
                 last_stats = now
 
     def _packet_handler(self, payload) -> int:
-        start = time.time()
-        packet = self._parse_packet(payload.get_data())
-        if not packet:
+        # ponytail: never let one bad packet kill capture — fail open (ACCEPT)
+        try:
+            start = time.time()
+            packet = self._parse_packet(payload.get_data())
+            if not packet:
+                return 1
+
+            with self._lock:
+                self._packet_count += 1
+
+            detection = self._run_detection_pipeline(packet)
+            verdict = self._decide(packet, detection)
+
+            self._apply_verdict(0, verdict, packet, detection, start)
+            return 0
+        except Exception as e:
+            logger.warning(f"[InlineEngine] Packet handler error (ACCEPT): {e}")
             return 1
 
-        with self._lock:
-            self._packet_count += 1
+    @staticmethod
+    def _canon_key(packet: Dict) -> str:
+        """Directionless flow key — our egress and their reply share it."""
+        a = (packet.get("src_ip", ""), packet.get("src_port", 0))
+        b = (packet.get("dst_ip", ""), packet.get("dst_port", 0))
+        lo, hi = (a, b) if a <= b else (b, a)
+        return f"{lo[0]}:{lo[1]}-{hi[0]}:{hi[1]}-{packet.get('protocol', '')}"
 
-        detection = self._run_detection_pipeline(packet)
+    def _touch_solicited(self, key: str) -> None:
+        now = time.time()
+        self._solicited[key] = now
+        if len(self._solicited) > 4096:  # ponytail: lazy prune, no timer thread
+            cutoff = now - 300
+            stale = [k for k, t in self._solicited.items() if t < cutoff]
+            for k in stale:
+                del self._solicited[k]
+            if len(self._solicited) > 4096:
+                for k in list(self._solicited)[:1024]:
+                    del self._solicited[k]
 
-        ip_reputation = None
-        rate_info = None
-        verdict = decide_verdict(detection, ip_reputation, rate_info)
+    def _is_solicited(self, key: str) -> bool:
+        ts = self._solicited.get(key, 0)
+        if ts and time.time() - ts < 300:
+            self._solicited[key] = time.time()  # active flows never expire
+            return True
+        return False
 
-        self._apply_verdict(0, verdict, packet, detection, start)
-        return 0
+    def _conntrack_solicited(self, packet: Dict) -> bool:
+        """True when the kernel holds a locally-initiated, bidirectional
+        conntrack entry for this flow — i.e. we asked for this traffic.
+        Detections still fire (alerts kept); only content-DPI verdicts skip."""
+        try:
+            now = time.time()
+            if now - self._own_time > 60:
+                # ponytail: v6 privacy extensions rotate temp addresses; a
+                # startup-only snapshot goes stale and everything looks foreign.
+                try:
+                    self._own_ips = local_ips()
+                except Exception:
+                    pass
+                self._own_time = now
+            if now - self._ct_time > 1.0:
+                self._ct_solicited = self._read_conntrack_solicited()
+                self._ct_time = now
+            proto = str(packet.get("protocol", "")).lower()
+            a = (self._norm_ip(packet.get("src_ip", "")), packet.get("src_port", 0) or 0)
+            b = (self._norm_ip(packet.get("dst_ip", "")), packet.get("dst_port", 0) or 0)
+            if a[1] == 0 and b[1] == 0:
+                key = (proto, min(a[0], b[0]), max(a[0], b[0]))
+            else:
+                lo, hi = (a, b) if a <= b else (b, a)
+                key = (proto, lo, hi)
+            return key in self._ct_solicited
+        except Exception:
+            return False
+
+    def _read_conntrack_solicited(self) -> set:
+        out = set()
+        try:
+            with open("/proc/net/nf_conntrack") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return out  # no conntrack (container?) — suppression off, monitor shows it
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            # ponytail: parts[2] is the proto NAME, parts[3] the number —
+            # indexing [2] against numbers silently matched nothing, so no
+            # local flow was ever recognized as solicited.
+            proto = {"6": "tcp", "17": "udp", "1": "icmp", "58": "icmp"}.get(parts[3])
+            if not proto:
+                proto = {"tcp": "tcp", "udp": "udp", "icmp": "icmp", "icmpv6": "icmp"}.get(parts[2])
+            if not proto:
+                continue
+            if proto == "tcp" and "[ASSURED]" not in line and "ESTABLISHED" not in line:
+                continue  # half-open outbound — nobody answered yet
+            # ponytail: UDP/ICMP accept in-flight entries too — the reply
+            # packet that SETS assured is judged before the flag exists,
+            # so requiring it missed every first reply (DNS, ping).
+            fields: Dict[str, str] = {}
+            for p in parts[5:]:
+                if "=" in p:
+                    k, _, v = p.partition("=")
+                    fields.setdefault(k, v)  # first occurrence = original direction
+            # ponytail: normalize v6 (conntrack zero-pads, parser doesn't —
+            # "01e3" != "1e3" as strings for the same address).
+            o_src, o_dst = self._norm_ip(fields.get("src", "")), self._norm_ip(fields.get("dst", ""))
+            if not o_src or not o_dst or o_src not in self._own_ips:
+                continue  # not initiated by us (inbound attack keeps full DPI)
+            o_sport = int(fields.get("sport", 0) or 0)
+            o_dport = int(fields.get("dport", 0) or 0)
+            if o_sport == 0 and o_dport == 0:
+                out.add((proto, min(o_src, o_dst), max(o_src, o_dst)))
+            else:
+                a, b = (o_src, o_sport), (o_dst, o_dport)
+                lo, hi = (a, b) if a <= b else (b, a)
+                out.add((proto, lo, hi))
+                # ponytail: coarser host-pair key too — v6 packets with
+                # extension headers parse portless, and only the tuple key
+                # would miss them. Rates still run; only content skips.
+                out.add((proto, min(o_src, o_dst), max(o_src, o_dst)))
+        return out
+
+    @staticmethod
+    def _norm_ip(ip: str) -> str:
+        try:
+            return ipaddress.ip_address(ip).compressed if ":" in str(ip) else str(ip)
+        except ValueError:
+            return str(ip)
+
+    def _decide(self, packet: Dict, detections: List[Dict]) -> Verdict:
+        """Verdict with flood rate-limiting consulted (was wired but inert)."""
+        try:
+            payload = packet.get("payload") or b""
+            throttled, _info = self._rate_limiter.check(
+                packet.get("src_ip", ""), byte_count=len(payload))
+        except Exception as e:
+            logger.debug(f"[InlineEngine] Rate limiter error: {e}")
+            return decide_verdict(detections)
+        return decide_verdict(detections, rate_info={"is_throttled": throttled})
+
+    def _hit_log_allowed(self, packet: Dict, detections: List[Dict]) -> bool:
+        """Per-(src_ip, attack_type) log gate for the verdict hot path."""
+        if not detections:
+            return False
+        key = f"{packet.get('src_ip', '')}|{detections[0].get('attack_type', '')}"
+        now = time.time()
+        if now - self._hit_log_at.get(key, 0.0) < self._hit_log_cooldown:
+            return False
+        self._hit_log_at[key] = now
+        if len(self._hit_log_at) > 5000:  # ponytail: cardinality cap, never delete
+            self._hit_log_at.clear()
+        return True
 
     def _run_detection_pipeline(self, packet: Dict) -> List[Dict]:
-        detections = []
+        # ponytail: pipeline-wide guard — an unhandled raise here used to kill
+        # the NFQUEUE/tcpdump thread while _running stayed true (silent outage)
+        detections: List[Dict] = []
+        try:
+            return self._run_detection_pipeline_inner(packet, detections)
+        except Exception as e:
+            logger.warning(f"[InlineEngine] Pipeline error (partial={len(detections)}): {e}")
+            return detections
+
+    def _run_detection_pipeline_inner(self, packet: Dict, detections: List[Dict]) -> List[Dict]:
         src_ip = packet.get("src_ip", "")
         dst_ip = packet.get("dst_ip", "")
         src_port = packet.get("src_port", 0)
@@ -454,6 +637,19 @@ class InlineEngine:
         if src_ip in whitelist:
             self._flow_cache.track_packet(flow_key, has_payload)
             return detections
+
+        # ponytail: 127/8 NOT skipped — localhost attacks (malicious local
+        # process, pentester curling localhost, container-to-container) are
+        # real signal; replay fixtures are 127.0.0.1-sourced.
+        if src_ip in self._own_ips:
+            self._touch_solicited(self._canon_key(packet))
+            return detections
+
+        solicited = self._is_solicited(self._canon_key(packet))
+        if not solicited and self._local_inline and not self._is_bridge_mode():
+            # ponytail: INPUT-only queue never sees our egress, so the
+            # in-memory set stays empty — ask the kernel's conntrack instead.
+            solicited = self._conntrack_solicited(packet)
 
         if self._bloom_filter.contains(src_ip):
             detections.append({
@@ -488,7 +684,7 @@ class InlineEngine:
             if has_payload:
                 direction = "client" if src_port > 1024 else "server"
                 messages = self._stream_reassembler.add_segment(packet, direction)
-                if messages and conn:
+                if messages and conn and not solicited:
                     app_proto = conn.app_protocol if conn else ""
                     run_dpi = True
                     for msg in messages:
@@ -502,7 +698,7 @@ class InlineEngine:
                                 "confidence": dpi_result.confidence,
                                 "mitre": dpi_result.mitre,
                             })
-                elif conn and conn.app_protocol == "tls":
+                elif conn and conn.app_protocol == "tls" and not solicited:
                     payload = packet.get("payload", b"")
                     if payload:
                         dpi_result = self._dpi_engine.inspect_stream(payload, "tls")
@@ -517,7 +713,7 @@ class InlineEngine:
                             })
         else:
             payload = packet.get("payload", b"")
-            if payload:
+            if payload and not solicited:
                 run_dpi = True
                 dpi_result = self._dpi_engine.inspect_packet(payload, protocol)
                 if dpi_result:
@@ -530,14 +726,23 @@ class InlineEngine:
                         "mitre": dpi_result.mitre,
                     })
 
-        for analyzer in (self._dos_detector, self._fragment_analyzer,
-                         self._port_analyzer, self._tunnel_detector,
-                         self._covert_detector, self._ipv6_analyzer,
-                         self._l2_analyzer, self._timing_analyzer,
-                         self._proxy_detector,
-                         self._tcp_fingerprinter,
-                         self._behavioral_analyzer,
-                         self._session_correlator):
+        analyzers = (self._dos_detector, self._fragment_analyzer,
+                       self._port_analyzer, self._tunnel_detector,
+                       self._covert_detector, self._ipv6_analyzer,
+                       self._l2_analyzer, self._timing_analyzer,
+                       self._proxy_detector,
+                       self._tcp_fingerprinter,
+                       self._behavioral_analyzer,
+                       self._session_correlator,
+                       self._per_ip_baseline)
+        # ponytail: replies we asked for — rates yes, content no. Session
+        # correlator + IPv6-tunnel heuristics both judge content and both
+        # FP'd on solicited DNS/TLS replies (8.8.8.8, Telegram).
+        if solicited:
+            analyzers = tuple(a for a in analyzers
+                              if a not in (self._session_correlator,
+                                           self._ipv6_analyzer))
+        for analyzer in analyzers:
             try:
                 result = analyzer.analyze(packet)
                 if result:
@@ -567,45 +772,60 @@ class InlineEngine:
 
         if detections and self._on_detection_callback:
             for d in detections:
-                self._on_detection_callback({
-                    "type": "attack",
-                    "data": {
-                        "detection": d,
-                        "verdict": verdict.value,
-                        "packet": {
-                            "src_ip": packet.get("src_ip", ""),
-                            "dst_ip": packet.get("dst_ip", ""),
-                            "src_port": packet.get("src_port", 0),
-                            "dst_port": packet.get("dst_port", 0),
-                            "protocol": packet.get("protocol", ""),
-                        },
-                        "latency_ms": round(latency, 2),
-                    }
-                })
+                try:
+                    pcap = self._recorder.maybe_dump(d)
+                    if pcap:
+                        d["forensics_pcap"] = pcap
+                    self._on_detection_callback({
+                        "type": "attack",
+                        "data": {
+                            "detection": d,
+                            "verdict": verdict.value,
+                            "packet": {
+                                "src_ip": packet.get("src_ip", ""),
+                                "dst_ip": packet.get("dst_ip", ""),
+                                "src_port": packet.get("src_port", 0),
+                                "dst_port": packet.get("dst_port", 0),
+                                "protocol": packet.get("protocol", ""),
+                            },
+                            "latency_ms": round(latency, 2),
+                        }
+                    })
+                except Exception as e:
+                    logger.warning(f"[InlineEngine] Detection callback error: {e}")
 
     def _parse_packet(self, raw_data: bytes) -> Optional[Dict]:
         if not raw_data or len(raw_data) < 14:
             return None
 
+        # ponytail: forensics window fills here — the one choke point every
+        # capture source flows through. Framing mirrors the eth check below.
+        is_eth = raw_data[12:14] in (b"\x08\x00", b"\x86\xdd") and self._inner_ip_ok(raw_data)
+        self._recorder.note_packet(time.time(), raw_data, is_eth)
+
         if HAS_DPKT:
             try:
-                first_nibble = raw_data[0] >> 4
+                # ponytail: ethertype-first. The old first-nibble sniff misparsed
+                # any Ethernet frame whose dst MAC starts 0x4_/0x6_ as raw IP —
+                # in bridge mode that blinded us to every frame forwarded to such
+                # a host (parsed as IPv6 garbage, payload invisible, no detects).
+                eth_type = struct.unpack("!H", raw_data[12:14])[0]
+                if eth_type in (0x0800, 0x86DD) and self._inner_ip_ok(raw_data):
+                    first_nibble = None
+                else:
+                    first_nibble = raw_data[0] >> 4
                 if first_nibble == 4:
                     return self._parse_dpkt_ip(raw_data, dpkt.ip.IP)
                 elif first_nibble == 6:
                     return self._parse_dpkt_ip6(raw_data, dpkt.ip6.IP6)
                 eth = dpkt.ethernet.Ethernet(raw_data)
-                packet = {"raw_len": len(raw_data)}
 
                 if isinstance(eth.data, dpkt.ip.IP):
                     return self._parse_dpkt_ip_from_eth(eth)
                 elif isinstance(eth.data, dpkt.ip6.IP6):
-                    ip6 = eth.data
-                    packet["src_ip"] = socket.inet_ntop(socket.AF_INET6, ip6.src)
-                    packet["dst_ip"] = socket.inet_ntop(socket.AF_INET6, ip6.dst)
-                    packet["protocol"] = "ipv6"
-                    packet["payload_len"] = len(ip6.data)
-                    return packet
+                    # ponytail: same v6 parse as the raw-L3 path — a separate
+                    # inline version here once left all framed v6 portless.
+                    return self._parse_dpkt_ip6(bytes(eth.data), dpkt.ip6.IP6)
 
             except Exception as e:
                 logger.warning(f"[InlineEngine] dpkt parse error: {e}")
@@ -614,6 +834,25 @@ class InlineEngine:
             return self._minimal_parse(raw_data)
 
         return None
+
+    @staticmethod
+    def _inner_ip_ok(raw_data: bytes) -> bool:
+        """Sanity-check bytes[14:] look like an IP header before treating
+        raw_data as an Ethernet frame — a raw L3 packet from 8.0.x.x would
+        otherwise collide on ethertype 0x0800. Total-len check allows
+        Ethernet min-frame padding (buffer bigger than header claims)."""
+        if len(raw_data) < 20:
+            return False
+        ver = raw_data[14] >> 4
+        if ver == 6:
+            return len(raw_data) >= 14 + 40
+        if ver != 4:
+            return False
+        ihl = (raw_data[14] & 0x0F) * 4
+        if ihl < 20 or len(raw_data) < 14 + ihl:
+            return False
+        total = struct.unpack("!H", raw_data[16:18])[0]
+        return total <= len(raw_data) - 14
 
     def _parse_dpkt_ip(self, raw_data, ip_class):
         ip = ip_class(raw_data)
@@ -631,9 +870,75 @@ class InlineEngine:
         packet = {"raw_len": len(raw_data)}
         packet["src_ip"] = socket.inet_ntop(socket.AF_INET6, ip6.src)
         packet["dst_ip"] = socket.inet_ntop(socket.AF_INET6, ip6.dst)
-        packet["protocol"] = "ipv6"
+        # ponytail: v6 used to stop here (protocol "ipv6", no ports/payload) —
+        # most laptop web traffic is v6, so the shield was half-blind. dpkt
+        # already decodes the upper layer; reuse the v4 transport parse.
+        packet["protocol"] = {6: "tcp", 17: "udp", 58: "icmp"}.get(getattr(ip6, "nxt", -1), "ipv6")
         packet["payload_len"] = len(ip6.data)
+        if packet["protocol"] in ("tcp", "udp"):
+            try:
+                self._parse_transport(ip6, packet)
+            except Exception:
+                pass
+        if "src_port" not in packet:
+            # dpkt leaves data raw when extension headers sit between v6
+            # and L4 (common on CDN traffic) — walk them manually.
+            try:
+                self._manual_v6_l4(raw_data, packet)
+            except Exception:
+                pass
         return packet
+
+    def _manual_v6_l4(self, v6_raw: bytes, packet: Dict) -> None:
+        """Extract TCP/UDP ports walking v6 extension headers. Mirrors the
+        v4 manual parse; ESP(50) is opaque and terminal."""
+        if len(v6_raw) < 40:
+            return
+        nxt = v6_raw[6]
+        off = 40
+        while nxt in (0, 43, 44, 60, 135, 140, 51):
+            if off + 8 > len(v6_raw):
+                return
+            nxt_new = v6_raw[off]
+            if nxt == 44:
+                ln = 8
+            elif nxt == 51:
+                ln = (v6_raw[off + 1] + 2) * 4
+            else:
+                ln = (v6_raw[off + 1] + 1) * 8
+            off += ln
+            nxt = nxt_new
+            if off > len(v6_raw):
+                return
+        if nxt == 6 and len(v6_raw) >= off + 20:
+            hdr = v6_raw[off:]
+            packet["src_port"] = struct.unpack("!H", hdr[0:2])[0]
+            packet["dst_port"] = struct.unpack("!H", hdr[2:4])[0]
+            packet["tcp_seq"] = struct.unpack("!I", hdr[4:8])[0]
+            fb = hdr[13]
+            packet["flags"] = ""
+            if fb & 0x02:
+                packet["flags"] += "S"
+            if fb & 0x10:
+                packet["flags"] += "A"
+            if fb & 0x01:
+                packet["flags"] += "F"
+            if fb & 0x04:
+                packet["flags"] += "R"
+            if fb & 0x08:
+                packet["flags"] += "P"
+            tlen = ((hdr[12] >> 4) & 0x0F) * 4
+            packet["payload"] = hdr[tlen:]
+            packet["payload_len"] = len(packet["payload"])
+            packet["protocol"] = "tcp"
+        elif nxt == 17 and len(v6_raw) >= off + 8:
+            hdr = v6_raw[off:]
+            packet["src_port"] = struct.unpack("!H", hdr[0:2])[0]
+            packet["dst_port"] = struct.unpack("!H", hdr[2:4])[0]
+            ulen = struct.unpack("!H", hdr[4:6])[0]
+            packet["payload"] = hdr[8:ulen]
+            packet["payload_len"] = len(packet["payload"])
+            packet["protocol"] = "udp"
 
     def _parse_dpkt_ip_from_eth(self, eth):
         ip = eth.data
@@ -735,6 +1040,10 @@ class InlineEngine:
         sock = None
         try:
             sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER)
+            # ponytail: bursts ENOBUFS'd the default 212KB rcvbuf faster than
+            # the pipeline drains → shield silently fell back to sniff-only.
+            # 8MB holds ~5k full-size packets of verdict backlog.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
             sock.settimeout(1.0)
             for port_attempt in range(5):
                 try:
@@ -745,19 +1054,22 @@ class InlineEngine:
                         raise
                     logger.debug(f"[InlineEngine] Bind attempt {port_attempt} failed: {e}")
                     continue
-            # Clean up stale bindings: best-effort (no ACK), may fail on fresh boot
+            # ponytail: queue BIND takes pf=AF_UNSPEC — a family-specific pf
+            # (AF_INET/...) is rejected with ENODEV. PF_BIND was removed from
+            # modern kernels, so don't send it at all. One bind serves every
+            # family (inet + bridge hooks can share the queue number).
+            # ponytail: UNBIND must consume its own reply — a no-ack unbind
+            # leaves a stale ERROR in the socket buffer that the BIND ack-read
+            # then misattributes to BIND (phantom ENODEV, NFQUEUE never starts).
             try:
-                self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_UNBIND, socket.AF_INET, 0,
-                                      "PF_UNBIND AF_INET", request_ack=False)
-                self._nfq_send_config(sock, NFQNL_CFG_CMD_UNBIND, socket.AF_INET, queue_num,
-                                      "UNBIND", request_ack=False)
-            except Exception as e:
-                logger.warning(f"[InlineEngine] Stale NFQUEUE unbind skipped: {e}")
-            self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET, 0, "PF_BIND AF_INET")
-            self._nfq_send_config(sock, NFQNL_CFG_CMD_PF_BIND, socket.AF_INET6, 0, "PF_BIND AF_INET6")
-            self._nfq_send_config(sock, NFQNL_CFG_CMD_BIND, socket.AF_INET, queue_num, "BIND")
+                self._nfq_send_config(sock, NFQNL_CFG_CMD_UNBIND, 0, queue_num,
+                                      "UNBIND")
+            except Exception:
+                pass  # queue wasn't bound; BIND proceeds
+            self._nfq_send_config(sock, NFQNL_CFG_CMD_BIND, 0, queue_num, "BIND")
             self._nfq_set_copy_mode(sock, queue_num, NFQNL_COPY_PACKET, 0xFFFF)
-            logger.info(f"[InlineEngine] NFQUEUE consumer bound to queue {queue_num}")
+            self._nfq_set_queue_maxlen(sock, queue_num, self._queue_maxlen)
+            logger.info(f"[InlineEngine] NFQUEUE consumer bound to queue {queue_num} (monitor_only={self._monitor_only})")
         except Exception as e:
             if sock:
                 sock.close()
@@ -771,7 +1083,10 @@ class InlineEngine:
 
     def _nfq_send_config(self, sock, cmd, pf, queue_num, label="", request_ack=True):
         nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_CONFIG
-        cmd_data = struct.pack(">BBH", cmd, 0, pf)
+        # ponytail: uapi struct is (command, pf, queue_num) — the old code sent
+        # (cmd, 0, pf), so BIND always targeted the wrong queue. queue_num also
+        # rides in the nfgen header; the two must agree or the kernel ENODEVs.
+        cmd_data = struct.pack(">BBH", cmd, pf, queue_num)
         attr = self._nfq_nlattr(NFQA_CFG_CMD, cmd_data)
         nfgen = struct.pack(">BBH", 0, 0, queue_num)
         payload = nfgen + attr
@@ -790,6 +1105,15 @@ class InlineEngine:
         msg = self._nfq_nlmsg(nlm_type, NLM_F_REQUEST | NLM_F_ACK, 2, os.getpid(), payload)
         sock.send(msg)
         self._nfq_recv_ack(sock, "COPY_MODE")
+
+    def _nfq_set_queue_maxlen(self, sock, queue_num, maxlen):
+        nlm_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_CONFIG
+        attr = self._nfq_nlattr(NFQA_CFG_QUEUE_MAXLEN, struct.pack(">I", maxlen))
+        nfgen = struct.pack(">BBH", 0, 0, queue_num)
+        payload = nfgen + attr
+        msg = self._nfq_nlmsg(nlm_type, NLM_F_REQUEST | NLM_F_ACK, 3, os.getpid(), payload)
+        sock.send(msg)
+        self._nfq_recv_ack(sock, "QUEUE_MAXLEN")
 
     def _nfq_recv_ack(self, sock, label=""):
         data = sock.recv(4096)
@@ -843,11 +1167,17 @@ class InlineEngine:
                     self._packet_count += 1
                     pkt_batch_count += 1
                 detections = self._run_detection_pipeline(packet)
-                verdict = decide_verdict(detections)
+                verdict = self._decide(packet, detections)
                 nf_verdict = self._apply_nf_verdict(verdict)
+                log_hit = self._hit_log_allowed(packet, detections)
+                if nf_verdict == NF_DROP and self._monitor_only:
+                    # ponytail: monitor soak — log what WOULD drop, accept all.
+                    if log_hit:
+                        logger.warning(f"[InlineEngine] MONITOR would-drop {detections[0]['attack_type'] if detections else 'unknown'} from {packet.get('src_ip','')} (accepted)")
+                    nf_verdict = NF_ACCEPT
                 self._nfq_send_verdict(sock, nf_verdict, packet_id, queue_num)
                 self._apply_verdict(packet_id, verdict, packet, detections, time.time())
-                if detections:
+                if detections and log_hit:
                     logger.info(f"[InlineEngine] DETECTED {detections[0]['attack_type']} from {packet.get('src_ip','')} -> verdict={verdict.value}")
                 elif pkt_batch_count % 100 == 0:
                     logger.debug(f"[InlineEngine] Processed {pkt_batch_count} packets...")
@@ -929,17 +1259,18 @@ class InlineEngine:
                            capture_output=True, timeout=5)
             cmd = [nft_tool, "add", "rule", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain,
                    "meta", "iifname", interface,
-                   "queue", "num", str(queue_num)]
+                   "queue", "num", str(queue_num), "bypass"]
             result = subprocess.run(cmd, capture_output=True, timeout=5)
             if result.returncode != 0:
                 cmd = [nft_tool, "add", "rule", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain,
-                       "queue", "num", str(queue_num)]
+                       "queue", "num", str(queue_num), "bypass"]
                 result = subprocess.run(cmd, capture_output=True, timeout=5)
                 if result.returncode != 0:
                     logger.warning(f"[InlineEngine] nft queue rule failed: {result.stderr.decode()}")
                     self._teardown_nfqueue_nft()
                     return False
             logger.info(f"[InlineEngine] nftables queue {queue_num} on {interface} (chain={chain})")
+            self._nfqueue_family = nft_family
             return True
         except Exception as e:
             logger.warning(f"[InlineEngine] nftables setup error: {e}")
@@ -948,20 +1279,23 @@ class InlineEngine:
 
     def _teardown_nfqueue_nft(self):
         try:
-            subprocess.run(["nft", "delete", "table", "inet", self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
+            subprocess.run(["nft", "delete", "table", self._nfqueue_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
                            capture_output=True, timeout=5)
         except Exception as e:
             logger.warning(f"[InlineEngine] NFQUEUE teardown skipped: {e}")
 
     def _is_bridge_mode(self) -> bool:
-        bridge_cfg = self._config.get("bridge", {})
+        # ponytail: stock config ships placeholder bridge_name/interfaces, so
+        # only explicit opt-ins count — presence alone false-positived every
+        # local install onto the FORWARD chain.
+        if self._config.get("mode") == "inline":
+            return True
+        bridge_cfg = self._config.get("bridge", {}) or {}
         if bridge_cfg.get("enabled") is True:
             return True
-        if bridge_cfg.get("bridge_name"):
+        if bridge_cfg.get("auto_create") is True:
             return True
-        if bridge_cfg.get("interfaces", {}).get("wan") and bridge_cfg.get("interfaces", {}).get("lan"):
-            return True
-        return self._config.get("mode") == "inline"
+        return False
 
     def _nfqueue_chain(self) -> str:
         bridge_cfg = self._config.get("bridge", {})

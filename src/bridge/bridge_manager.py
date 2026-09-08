@@ -2,7 +2,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Dict, List
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.interface import detect_interface

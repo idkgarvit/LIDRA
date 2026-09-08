@@ -6,7 +6,6 @@ import sys
 import unittest
 from unittest.mock import patch
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 

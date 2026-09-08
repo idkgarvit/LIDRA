@@ -28,10 +28,9 @@ dependencies = [
     "psutil>=5.9.0",
     "rich>=13.0.0",
     "requests>=2.31.0",
-    "python-json-logger>=2.0.0",
     "dpkt>=1.9.0",
-    "dnspython>=2.6.0",
     "prometheus-client>=0.20.0",
+    "textual>=0.41.0",
 ]
 
 [project.urls]
@@ -40,9 +39,9 @@ Repository = "https://github.com/idkgarvit/LIDRA"
 Documentation = "https://github.com/idkgarvit/LIDRA"
 
 [project.scripts]
-lidra = "src.lidra_agent_v3:main"
-lidra-cli = "src.cli.main:main"
-lidra-tui = "src.tui.app:main"
+lidra = "lidra_agent_v3:main"
+lidra-cli = "cli.main:main"
+lidra-tui = "tui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -4,7 +4,6 @@ import os
 import socket
 import struct
 import logging
-import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +59,42 @@ def _interface_exists(name: str) -> bool:
         return False
 
 
+def local_ips() -> set:
+    """All local addresses, v4 + v6 (primary egress + hostname addrs).
+
+    Used to skip our own egress traffic in detectors — without this the
+    sensor flags its own DNS/HTTPS as attacks on external IPs.
+    """
+    ips = set()
+    try:  # primary egress IP (UDP connect sends no traffic)
+        sck = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sck.connect(("8.8.8.8", 80))
+        ips.add(sck.getsockname()[0])
+        sck.close()
+    except OSError:
+        pass
+    try:  # ponytail: same trick for v6 — without it every solicited v6
+        # flow looks foreign (most laptop web traffic is v6).
+        sck = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        sck.connect(("2001:4860:4860::8888", 80))
+        ips.add(sck.getsockname()[0])
+        sck.close()
+    except OSError:
+        pass
+    try:
+        for fam, _, _, _, addr in socket.getaddrinfo(socket.gethostname(), None):
+            # ponytail: never trust hostname -> 127.x (docker build sandbox,
+            # minimal VPS /etc/hosts). Loopback attacks are real signal —
+            # the pipeline inspects 127/8 by design, so it must not land here.
+            if fam == socket.AF_INET and not addr[0].startswith("127."):
+                ips.add(addr[0])
+            elif fam == socket.AF_INET6 and not addr[0].split("%")[0].startswith(("::1", "fe80:")):
+                ips.add(addr[0].split("%")[0])
+    except OSError:
+        pass
+    return ips
+
+
 def _default_route_interface() -> str:
     """Read default route from /proc/net/route to find the active interface."""
     try:
@@ -87,7 +122,6 @@ def _first_non_loopback() -> str:
             sck.close()
             return None
         sck.close()
-        import array
         n = struct.unpack("I", buf[16:20])[0]
         for i in range(n):
             ifname = buf[i * 32:(i + 1) * 32].split(b"\x00")[0].decode(errors="replace")

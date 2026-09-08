@@ -5,7 +5,7 @@ state_dir: ./state
 
 # General settings
 general:
-  verbose: true  # enable DEBUG-level logging for test
+  verbose: false  # retest: INFO level — DEBUG per-packet logs stalled verdicts
 
 # Database configuration
 database:
@@ -62,11 +62,15 @@ bridge:
 #     queue_bypass: true            # use --queue-bypass so unrouted pkts pass
 #   firewall_backend: nftables      # "nftables" (preferred) or "iptables"
 
-# Local (same-machine) mode — iptables INPUT NFQUEUE
+# Local (same-machine) mode — laptop inbound shield
 local:
   interface: null  # auto-detect if null
   nfqueue_num: 0
   nfqueue_maxlen: 1024
+  inline: true       # PHASE-1 LIVE TEST: hold inbound INPUT via NFQUEUE (monitor_only still accepts)
+  monitor_only: true # true = accept everything, only log what WOULD drop.
+                     # Set false (with inline: true) to really drop. Enforce
+                     # needs this explicit opt-in — never silently drops.
 
 # Inline Engine Configuration
 inline:
@@ -147,17 +151,6 @@ thresholds:
   ttl_covert_window: 15
   ttl_covert_variations: 6
 
-# Timeouts (was hardcoded in multiple files)
-timeouts:
-  cleanup_interval: 60
-  socket_timeout: 1.0
-  subprocess_timeout: 5
-  nft_timeout: 15
-  stream_timeout: 300
-  tracking_window: 10
-  cooldown: 60
-  cleanup_hour: 3
-
 # nftables naming (was hardcoded in firewall.py and inline_engine.py)
 nftables:
   queue_table: lidra_nfqueue
@@ -227,7 +220,7 @@ suspicious_paths:
   - /.ssh/
   - /.aws/
 
-# Sensitive paths (was hardcoded in ebpf/tracer.py)
+# Sensitive paths watched by ebpf/tracer.py file-access analysis
 sensitive_paths:
   - /etc/passwd
   - /etc/shadow
@@ -334,8 +327,19 @@ tui:
   standalone: false  # Set to True to run TUI standalone with mock data
 
 # TLS fingerprinting — known malicious JA4 hashes
+# Seed: r3m0s/malicious-ja4-database (community, FoxIO JA4 spec).
+# Refresh: https://github.com/r3m0s/malicious-ja4-database , https://ja4db.foxio.io/
 tls_fingerprints:
-  malicious_ja4: []  # Populate from abuse.ch / suricata
+  malicious_ja4:
+    - t10i060500_4dc025c38c38_950472255fe9  # Covenant Grunt
+    - t12d190800_d83cc789557e_7af1ed941c26  # Cobalt Strike
+    - t13i131000_f57a46bbacb6_e5728521abd4  # Sliver
+    - t12i180600_4b22cbed5bed_2dae41c691ec  # Mythic / PoshC2
+    - t13i201100_2b729b4bf6f3_e24568c0d440  # Havoc Demon
+    - t12d180700_4b22cbed5bed_2dae41c691ec  # AADInternals / TokenTactics
+    - t13d1311h2_f57a46bbacb6_e7c285222651  # AzureHound
+    - t13d201100_2b729b4bf6f3_36bf25f296df  # GraphRunner
+    - t13d9013h1_c6771aded2ed_57a60bdf03d1  # GraphSpy / ROADtools
 
 # False-Positive Allowlist (reduces noise from known-good sources)
 allowlist:

@@ -14,11 +14,10 @@ import socket
 import threading
 import logging
 import re
-import os
 import time
 from datetime import datetime
 from typing import Optional, Callable, Dict, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from collections import defaultdict
 
 logger = logging.getLogger("lidra.syslog.server")
@@ -307,7 +306,6 @@ if __name__ == "__main__":
 
     try:
         while True:
-            import time
             time.sleep(10)
             stats = server.get_stats()
             print(f"Messages: {stats['messages_received']}, Attacks: {stats['attacks_detected']}")

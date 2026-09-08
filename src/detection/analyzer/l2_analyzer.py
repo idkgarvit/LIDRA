@@ -82,7 +82,6 @@ class L2Analyzer:
         return False
 
     def _check_arp_spoof(self, ip, mac, packet):
-        now = time.time()
         if ip in self._arp_cache:
             old_mac = self._arp_cache[ip]
             if old_mac != mac:

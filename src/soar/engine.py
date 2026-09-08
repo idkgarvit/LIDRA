@@ -4,7 +4,6 @@ import logging
 import os
 import subprocess
 import time
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional

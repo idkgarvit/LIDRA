@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 import readline
+readline.parse_and_bind("tab: complete")  # arrow-history + tab completion for input()
 
 from .commands import COMMANDS
 
@@ -188,7 +189,7 @@ def main():
     if args.interface:
         os.environ["LIDRA_INTERFACE"] = args.interface
 
-    if args.help and args.command == 'dashboard':
+    if args.help:
         console.print(Panel("""
 [bold]LIDRA v3 - Security CLI[/bold]
 

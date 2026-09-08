@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -30,11 +29,9 @@ def _resolve(token: str) -> str:
 
 def current_tokens_for_widget():
     try:
-        from textual.app import App
         from textual._context import active_app
         app = active_app.get()
         if app is not None:
-            from ..themes import current_tokens
             return current_tokens(app)
     except Exception:
         pass

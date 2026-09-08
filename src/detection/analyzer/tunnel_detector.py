@@ -48,7 +48,7 @@ class TunnelDetector:
         if self._dns_high_vol[ip] > 300:
             self._dns_high_vol[ip] = 0
             return {"attack_type": "dns_tunnel", "severity": "high", "source_ip": ip,
-                    "details": f"DNS flood >300 queries (possible tunnel)"}
+                    "details": "DNS flood >300 queries (possible tunnel)"}
         if plen > 200:
             self._dns_large[ip].append(plen)
             recent = self._dns_large[ip][-10:]

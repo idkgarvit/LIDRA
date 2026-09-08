@@ -18,12 +18,15 @@ def decide_verdict(detections: List[Dict], ip_reputation: Optional[Dict] = None,
                    rate_info: Optional[Dict] = None) -> Verdict:
     if not detections or not isinstance(detections, list):
         return Verdict.PASS
+    saw_medium = False
     for d in detections:
         severity = d.get("severity", "low")
         if severity in ("critical", "high"):
             return Verdict.DROP
         if severity == "medium":
-            return Verdict.LOG_ONLY
+            saw_medium = True
+    if saw_medium:
+        return Verdict.LOG_ONLY
 
     if ip_reputation:
         score = ip_reputation.get("threat_score", 0)

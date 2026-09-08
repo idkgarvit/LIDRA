@@ -6,14 +6,6 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_IPV6_TRANSITION_MECHS = {
-    "6to4": "192.88.99.0/24",
-    "teredo": "2001:0000::/32",
-    "sisco": "2002::/16",
-    "isatap": "2001:0DB8::/32",
-}
-
-
 class IPv6Analyzer:
     def __init__(self):
         self._ext_hdr_counts: Dict[str, int] = defaultdict(int)
@@ -60,8 +52,6 @@ class IPv6Analyzer:
         while next_hdr in (0, 43, 44, 60, 135) and offset < len(raw):
             if next_hdr == 44:
                 if offset + 8 <= len(raw):
-                    frag_offset = ((raw[offset + 2] & 0xF8) << 5) | raw[offset + 3]
-                    more_frags = raw[offset + 2] & 0x01
                     ident = (raw[offset + 4] << 24) | (raw[offset + 5] << 16) | (raw[offset + 6] << 8) | raw[offset + 7]
                     self._frag6_tracker[src_ip].append(ident)
                     recent_idents = self._frag6_tracker[src_ip][-20:]

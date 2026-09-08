@@ -147,7 +147,7 @@ def _bridge_exists(bridge_name: str) -> bool:
     res = _run([ip, "-d", "link", "show", bridge_name], check=False)
     if not res.success:
         return False
-    return f"bridge" in res.stdout
+    return "bridge" in res.stdout
 
 
 def _interface_exists(name: str) -> bool:

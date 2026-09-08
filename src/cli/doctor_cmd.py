@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
-from rich.box import ROUNDED, SIMPLE
+from rich.box import SIMPLE
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
@@ -40,9 +39,11 @@ def _yes(b: bool) -> str:
 def _resolve_db_path() -> Path:
     try:
         from utils.config_loader import get_cfg
+        from utils.paths import get_lidra_root
         rel = get_cfg("database.path")
         if rel:
-            return Path(rel).expanduser().resolve()
+            p = Path(rel).expanduser()
+            return p.resolve() if p.is_absolute() else get_lidra_root() / p
     except Exception as e:
         logger.debug(f"[doctor] get_cfg database.path failed: {e}")
     try:
@@ -230,7 +231,7 @@ def _table_lidra_config() -> Table:
         return t
 
     mode = get_cfg("mode", "(unset)")
-    dry_run = get_cfg("dry_run", "(unset)")
+    dry_run = get_cfg("response.dry_run", get_cfg("dry_run", "(unset)"))
     iface = get_cfg("collectors.network.interface") or get_cfg("local.interface") or "(auto)"
     bridge_wan = get_cfg("bridge.interfaces.wan") or "(auto)"
     bridge_lan = get_cfg("bridge.interfaces.lan") or "(auto)"
@@ -276,7 +277,7 @@ def _lidra_config_summary() -> Dict[str, Any]:
         return out
     out["config_exists"] = Path(out["config_path"]).exists()
     out["mode"] = get_cfg("mode", "(unset)")
-    out["dry_run"] = get_cfg("dry_run", "(unset)")
+    out["dry_run"] = get_cfg("response.dry_run", get_cfg("dry_run", "(unset)"))
     out["interface"] = (
         get_cfg("collectors.network.interface")
         or get_cfg("local.interface")

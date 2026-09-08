@@ -15,36 +15,22 @@ import sys
 import time
 import signal
 import logging
-import threading
-import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
-
-import psutil
-from utils.config_loader import get_cfg, load_config as load_central_config
+from typing import Dict
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from database.db import LIDRADatabase
-from intel.threat_intel import ThreatIntelOrchestrator
-from intel.abuseipdb import AbuseIPDBProvider
-from intel.virustotal import VirusTotalProvider
-from alerts.notifier import Alert, AlertNotifier
-from alerts.slack import SlackChannel
-from alerts.discord import DiscordChannel
-from response.firewall import FirewallManager
-from response.blocklist import Blocklist
-from detection.log_parser import LogParser
+from utils.config_loader import load_config as load_central_config
+
+from alerts.notifier import Alert
 from detection.attack_detector import AttackDetector
-from detection.mitre import MITREMapper
-from detection.ml.anomaly import AnomalyDetector
-from detection.explainer import AttackExplainer
-from ebpf import EBPFTracer, EBPFDetector, create_tracer
+from ebpf import EBPFDetector
 
 from collectors.network import create_sniffer
 from collectors.syslog import create_syslog_server
 from utils.interface import detect_interface
+from core.agent_base import LIDRACore
 
 try:
     from bridge.inline_engine import InlineEngine
@@ -60,24 +46,29 @@ except ImportError as e:
     TUIIPCServer = None
     HAS_BRIDGE = False
 
-if os.geteuid() != 0:
-    print("LIDRA requires root privileges. Re-run with sudo.")
-    sys.exit(1)
-
-LOG_DIR = Path(__file__).parent.parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_DIR / "lidra_v3.log"),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger("LIDRA-v3")
 
 BASE = Path(__file__).parent.parent
+
+
+def _require_root():
+    if os.geteuid() != 0:
+        print("LIDRA requires root privileges. Re-run with sudo.")
+        sys.exit(1)
+
+
+def _setup_logging(verbose: bool = False):
+    log_dir = BASE / "logs"
+    log_dir.mkdir(exist_ok=True)
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        handlers=[
+            logging.FileHandler(log_dir / "lidra_v3.log"),
+            logging.StreamHandler()
+        ],
+        force=True,
+    )
 
 
 def _config_dry_run(config: dict) -> bool:
@@ -93,916 +84,159 @@ def _config_dry_run(config: dict) -> bool:
 
 
 class LIDRAv3:
-    """
-    Main LIDRA v3 orchestrator with eBPF-powered detection.
-    """
-    
-    def __init__(self, config: dict):
-        self.config = config
-        self.running = False
-        self._config_mtime = 0
-        self.mode = config.get('mode', 'inline')
+    """Backward-compatible LIDRA v3 — dispatches to the mode-specific subclass."""
 
-        if config.get('general', {}).get('verbose', False) or os.environ.get("LIDRA_LOG_LEVEL") == "DEBUG":
-            logging.getLogger().setLevel(logging.DEBUG)
-            logger.debug("[Config] Verbose logging enabled")
-
-        mode_label = {
-            "inline": "INLINE BRIDGE",
-            "local": "LOCAL (same-machine)",
-        }.get(self.mode, "eBPF-Powered")
-        logger.info("=" * 60)
-        logger.info(f"LIDRA v3 - {mode_label} Detection System")
-        logger.info(f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
-        logger.info("=" * 60)
-
-        self.inline_engine = None
-        self.bridge_manager = None
-        self.tui_data_provider = None
-        self._tui_process = None
-
-        self._init_components()
-    
-    def _init_components(self):
-        """Initialize all detection components."""
-
-        # Database
-        db_path = BASE / self.config.get('database', {}).get('path', 'data/lidra.db')
-        self.db = LIDRADatabase(str(db_path))
-        logger.info(f"[DB] {db_path}")
-
-        if self.mode == 'inline':
-            self._init_bridge_mode()
-            return
-
-        if self.mode == 'local':
-            self._init_local_mode()
-            return
-
-        # Legacy monitor mode — eBPF / log-based
-        self.tracer = create_tracer(self.config)
-        loaded = self.tracer.load()
-
-        if self.tracer.is_using_ebpf():
-            logger.info("[eBPF] Kernel-level telemetry ACTIVE")
-            self.detector = EBPFDetector()
+    def __new__(cls, config: dict):
+        mode = config.get('mode', 'inline')
+        if mode == 'inline':
+            from core.gateway_agent import LIDRAGateway
+            instance = object.__new__(LIDRAGateway)
+            instance.__init__(config)
+            return instance
+        elif mode == 'local':
+            from core.personal_agent import LIDRAPersonal
+            instance = object.__new__(LIDRAPersonal)
+            instance.__init__(config)
+            return instance
         else:
-            logger.info("[eBPF] FALLBACK: Using log-based detection")
-            self.detector = AttackDetector()
+            return _LegacyMonitorAgent(config)
 
-        self.tracer.register_callback(self._on_security_event)
 
-        self.mitre_mapper = MITREMapper()
-        logger.info("[MITRE] ATT&CK framework loaded")
+class _LegacyMonitorAgent(LIDRACore):
+    """Legacy eBPF / log-based monitor mode — preserved for backward compat."""
 
-        self.anomaly_detector = AnomalyDetector()
-        logger.info("[ML] Statistical anomaly detection enabled")
-
-        self.explainer = AttackExplainer()
-        logger.info("[AI] Attack explanations enabled")
-
-        self.threat_intel = self._init_threat_intel()
-        self.notifier = self._init_alerting()
-
+    def _init_mode_components(self):
+        from response.firewall import FirewallManager
         self.firewall = FirewallManager(
             backend=self.config.get('response', {}).get('firewall', 'iptables'),
-            dry_run=_config_dry_run(self.config)
+            dry_run=_config_dry_run(self.config),
         )
-        logger.info(f"[Firewall] dry_run={self.firewall.dry_run}")
-
-    @property
-    def is_dry_run(self) -> bool:
-        """Single source of truth for response-dry-run checks.
-
-        Reads from the firewall instance when available; falls back to the
-        config helper so the agent and firewall can never disagree.
-        """
-        fw = getattr(self, "firewall", None)
-        if fw is not None:
-            return bool(fw.dry_run)
-        return _config_dry_run(self.config)
-
+        from ebpf import create_tracer
+        self.tracer = create_tracer(self.config)
+        self.tracer.load()
+        if self.tracer.is_using_ebpf():
+            self.detector = EBPFDetector()
+        else:
+            self.detector = AttackDetector()
+        self.tracer.register_callback(self._on_security_event)
         from dashboard.cli import create_cli_dashboard
         self.cli_dashboard = create_cli_dashboard(self.db)
         self.cli_dashboard.print_welcome()
-        logger.info("[CLI] Terminal dashboard ready")
-
         self.sniffer = None
         self.syslog_server = None
         self._init_collectors()
 
-    def _push_tui_event(self, event: dict):
-        """Push event to TUI — both in-process data provider and IPC subprocess."""
-        if self.tui_data_provider:
-            self.tui_data_provider.push_event(event)
-        if self._tui_ipc_server and self._tui_ipc_server.socket_path:
-            self._tui_ipc_server.broadcast_event(event)
-
-    def _init_bridge_mode(self):
-        """Initialize inline bridge mode components."""
-        logger.info("=" * 60)
-        logger.info("BRIDGE MODE — Inline Transparent Gateway")
-        logger.info("=" * 60)
-
-        self.detector = AttackDetector()
-        self.mitre_mapper = MITREMapper()
-        logger.info("[MITRE] ATT&CK framework loaded")
-
-        self.anomaly_detector = AnomalyDetector()
-        self.explainer = AttackExplainer()
-        logger.info("[AI] Attack explanations enabled")
-
-        self.threat_intel = self._init_threat_intel()
-        self.notifier = self._init_alerting()
-
-        self.firewall = FirewallManager(
-            backend=self.config.get('response', {}).get('firewall', 'nftables'),
-            dry_run=_config_dry_run(self.config)
-        )
-        logger.info(f"[Firewall] dry_run={self.firewall.dry_run}")
-
-        self.inline_engine = None
-        self.bridge_manager = None
-        self.tui_data_provider = None
-        self._tui_ipc_server = None
-        self._tui_process = None
-
-        if HAS_BRIDGE:
-            self.inline_engine = InlineEngine(
-                config=self.config,
-                db=self.db,
-                detector=self.detector,
-                response_handler=self.firewall,
-                metrics_collector=None
-            )
-            self.inline_engine.register_detection_callback(self._on_packet_detection)
-
-            self.bridge_manager = BridgeManager(self.config)
-            self.tui_data_provider = TUIDataProvider(
-                inline_engine=self.inline_engine,
-                bridge_manager=self.bridge_manager,
-                db=self.db
-            )
-            logger.info("[Bridge] Inline engine + TUI data provider ready")
-        else:
-            logger.warning("[Bridge] Bridge modules not available — install dependencies")
-
-        from dashboard.cli import create_cli_dashboard
-        self.cli_dashboard = create_cli_dashboard(self.db)
-        self.cli_dashboard.print_welcome()
-        logger.info("[Bridge] Initialization complete")
-
-    def _init_local_mode(self):
-        logger.info("=" * 60)
-        logger.info("LOCAL MODE — Same-Machine Inline Detection")
-        logger.info("=" * 60)
-
-        # Detect WiFi interface (NFQUEUE would break WiFi)
-        iface = detect_interface()
-        if iface and os.path.exists(f"/sys/class/net/{iface}/wireless"):
-            logger.warning(f"[WiFi] Interface {iface} is wireless — using AF_PACKET (NFQUEUE skipped)")
-
-        self.detector = AttackDetector()
-        self.mitre_mapper = MITREMapper()
-        self.anomaly_detector = AnomalyDetector()
-        self.explainer = AttackExplainer()
-        self.threat_intel = self._init_threat_intel()
-        self.notifier = self._init_alerting()
-
-        self.tracer = create_tracer(self.config)
-        loaded = self.tracer.load()
-        if self.tracer.is_using_ebpf():
-            logger.info("[eBPF] Kernel-level telemetry ACTIVE (local mode)")
-        else:
-            logger.info("[eBPF] FALLBACK: Log-based detection ACTIVE in local mode")
-        self.tracer.register_callback(self._on_security_event)
-
-        self.firewall = FirewallManager(
-            backend=self.config.get('response', {}).get('firewall', 'iptables'),
-            dry_run=_config_dry_run(self.config)
-        )
-        logger.info(f"[Firewall] dry_run={self.firewall.dry_run}")
-
-        if HAS_BRIDGE:
-            self.inline_engine = InlineEngine(
-                config=self.config,
-                db=self.db,
-                detector=self.detector,
-                response_handler=self.firewall,
-                metrics_collector=None
-            )
-            self.inline_engine.register_detection_callback(self._on_packet_detection)
-            self.tui_data_provider = TUIDataProvider(
-                inline_engine=self.inline_engine,
-                bridge_manager=None,
-                db=self.db
-            )
-            logger.info("[Local] Inline engine + TUI data provider ready")
-        else:
-            logger.warning("[Local] Bridge modules not available — install dependencies")
-            self.inline_engine = None
-
-        from dashboard.cli import create_cli_dashboard
-        self.cli_dashboard = create_cli_dashboard(self.db)
-        self.cli_dashboard.print_welcome()
-        logger.info("[Local] Initialization complete")
-
-    def _init_collectors(self):
-        """Initialize network collectors."""
-        collectors = self.config.get('collectors', {})
-        network_enabled = collectors.get('network', {}).get('enabled', True)
-        syslog_enabled = collectors.get('syslog', {}).get('enabled', True)
-
-        if network_enabled:
-            interface = collectors.get('network', {}).get('interface') or detect_interface()
-            self.sniffer = create_sniffer(interface=interface, callback=self._on_network_event)
-            logger.info(f"[Network] Packet sniffer ready (interface: {interface})")
-
-        if syslog_enabled:
-            port = collectors.get('syslog', {}).get('port', 514)
-            self.syslog_server = create_syslog_server(port=port, callback=self._on_syslog_event)
-            logger.info(f"[Syslog] Server ready (port: {port})")
-
-    def _on_network_event(self, event):
-        """Handle network packet events."""
-        if not event:
-            return
-
-        if "attack_type" in event:
-            logger.warning(f"[NETWORK] {event['attack_type']} from {event.get('source_ip', 'unknown')}")
-            self._process_network_detection(event)
-
-    def _on_syslog_event(self, event):
-        """Handle syslog events."""
-        if not event:
-            return
-
-        if "attack_type" in event:
-            logger.warning(f"[SYSLOG] {event['attack_type']} from {event.get('source_ip', 'unknown')}")
-            self._process_network_detection(event)
-
-    def _process_network_detection(self, detection: Dict):
-        """Process network/syslog detection."""
-        try:
-            attack_type = detection.get('attack_type', 'unknown')
-            severity = detection.get('severity', 'medium')
-            source_ip = detection.get('source_ip', 'unknown')
-
-            if source_ip == 'unknown':
-                return
-
-            whitelist = self.config.get('whitelist', [])
-            if source_ip in whitelist:
-                logger.debug(f"[WL] Skipping detection from whitelisted IP {source_ip}")
-                return
-
-            attacker_id = self.db.add_attacker(source_ip, "", "")
-            self.db.record_attack(attacker_id, attack_type, source_log='network', raw_line=detection.get('details', ''))
-
-            if severity in ('high', 'critical'):
-                no_block = self.config.get("no_block", [])
-                if source_ip in no_block:
-                    logger.debug(f"[NOBLOCK] {source_ip} — detected but not blocked")
-                else:
-                    alert = Alert(
-                        alert_type=attack_type,
-                        severity=severity,
-                        ip_address=source_ip,
-                        message=detection.get('details', attack_type)
-                    )
-                    self.notifier.notify(alert)
-                    self.db.add_alert(attack_type, severity, source_ip, detection.get('details', '')[:500])
-
-                    if not self.is_dry_run:
-                        self.firewall.block_ip(source_ip, f"network_{attack_type}")
-                        logger.info(f"[BLOCKED] {source_ip} via network detection")
-
-        except Exception as e:
-            logger.error(f"Network detection processing error: {e}")
-    
-    def _init_threat_intel(self) -> ThreatIntelOrchestrator:
-        """Initialize threat intelligence."""
-        providers = []
-        
-        abuse_key = self.config.get('threat_intel', {}).get('abuseipdb_api_key', '')
-        vt_key = self.config.get('threat_intel', {}).get('virustotal_api_key', '')
-        
-        if abuse_key:
-            providers.append(AbuseIPDBProvider(abuse_key))
-        
-        if vt_key:
-            providers.append(VirusTotalProvider(vt_key))
-        
-        return ThreatIntelOrchestrator(
-            providers,
-            check_on_detect=self.config.get('threat_intel', {}).get('check_on_detect', True),
-            cache_ttl_seconds=self.config.get('threat_intel', {}).get('cache_ttl_seconds', 3600),
-            max_cache=self.config.get('threat_intel', {}).get('max_cache', 10000),
-        )
-    
-    def _init_alerting(self) -> AlertNotifier:
-        """Initialize alerting channels."""
-        channels = []
-        
-        slack = self.config.get('alerts', {}).get('slack_webhook', '')
-        discord = self.config.get('alerts', {}).get('discord_webhook', '')
-        
-        if slack:
-            channels.append(SlackChannel(slack))
-        
-        if discord:
-            channels.append(DiscordChannel(discord))
-        
-        return AlertNotifier(channels)
-    
-    def _on_packet_detection(self, event: Dict):
-        """Handle detections from the inline engine pipeline."""
-        try:
-            data = event.get("data", {})
-            detection = data.get("detection", {})
-            verdict = data.get("verdict", "pass")
-
-            attack_type = detection.get("attack_type", "unknown")
-            severity = detection.get("severity", "medium")
-            source_ip = detection.get("source_ip", "")
-            details = detection.get("details", "")
-            packet_info = data.get("packet", {})
-
-            if not source_ip:
-                return
-
-            whitelist = self.config.get('whitelist', [])
-            if source_ip in whitelist:
-                logger.debug(f"[WL] Skipping detection from whitelisted IP {source_ip}")
-                return
-
-            from utils.allowlist import should_suppress
-            suppress, reason = should_suppress(source_ip, attack_type, self.config)
-            if suppress:
-                logger.debug(f"[ALLOWLIST] Skipping {attack_type} from {source_ip} ({reason})")
-                return
-
-            detected = self.detector.analyze_packet_event(detection)
-            if not detected:
-                return
-
-            attacker_id = self.db.add_attacker(
-                source_ip,
-                country="",
-                org=""
-            )
-            self.db.record_attack(
-                attacker_id,
-                attack_type,
-                source_log="bridge_inline",
-                raw_line=details[:500]
-            )
-
-            if severity in ("high", "critical") and verdict == "drop":
-                no_block = self.config.get("no_block", [])
-                if source_ip in no_block:
-                    logger.debug(f"[NOBLOCK] {source_ip} — detected but not blocked")
-                else:
-                    alert = Alert(
-                        alert_type=attack_type,
-                        severity=severity,
-                        ip_address=source_ip,
-                        message=f"[INLINE] {details} — {verdict}"
-                    )
-                    self.notifier.notify(alert)
-                    self.db.add_alert(attack_type, severity, source_ip, details[:500])
-
-                    if not self.is_dry_run:
-                        self.firewall.bridge_block_ip(source_ip)
-                        logger.info(f"[INLINE] Dropped & blocked {source_ip} — {attack_type}")
-                        self._push_tui_event({
-                                "type": "block",
-                                "data": {
-                                    "ip": source_ip,
-                                    "reason": f"Inline detection: {attack_type}",
-                                    "timestamp": datetime.now().isoformat(),
-                                }
-                            })
-
-            logger.info(f"[INLINE] {attack_type} | {source_ip} | {severity} | verdict={verdict}")
-
-            # Push to TUI data provider
-            self._push_tui_event({
-                    "type": "attack",
-                    "data": {
-                        "ip": source_ip,
-                        "type": attack_type,
-                        "severity": severity,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                })
-
-        except Exception as e:
-            logger.error(f"Packet detection callback error: {e}")
-
-    def _on_security_event(self, event):
-        """Handle security events from eBPF/logs."""
-        try:
-            detection = None
-            
-            pre = (event.raw_data or {}).get('attack') if hasattr(event, 'raw_data') else None
-            if pre:
-                detection = {
-                    'attack_type': pre.get('attack_type', 'unknown'),
-                    'severity': pre.get('severity', 'medium'),
-                    'mitre': pre.get('mitre', []),
-                    'details': pre.get('details', {}),
-                }
-            else:
-                detection = self.detector.analyze_event(event)
-            
-            if not detection:
-                return
-            
-            attack_type = detection.get('attack_type', 'unknown')
-            severity = detection.get('severity', 'medium')
-            mitre = detection.get('mitre', [])
-
-            ip_address = getattr(event, 'dst_ip', '') or getattr(event, 'ip_address', '') or 'unknown'
-
-            from utils.allowlist import should_suppress
-            suppress, reason = should_suppress(ip_address, attack_type, self.config)
-            if suppress:
-                logger.debug(f"[ALLOWLIST] Skipping log-based {attack_type} from {ip_address} ({reason})")
-                return
-            
-            # Enrich with threat intel
-            intel = self.threat_intel.lookup_ip(ip_address)
-            
-            # Generate explanation
-            context = {
-                'detection': detection,
-                'event': event,
-                'threat_intel': intel
-            }
-            explanation = self.explainer.explain(detection, context)
-            
-            # Store in database
-            if ip_address != 'unknown':
-                attacker_id = self.db.add_attacker(
-                    ip_address,
-                    country=intel.get('details', {}).get('AbuseIPDB', {}).get('country'),
-                    org=intel.get('details', {}).get('AbuseIPDB', {}).get('isp')
-                )
-                
-                self.db.record_attack(
-                    attacker_id,
-                    attack_type,
-                    source_log='ebpf' if self.tracer.is_using_ebpf() else 'log',
-                    raw_line=explanation[:500]
-                )
-            
-            # Check if we should alert
-            if severity in ('high', 'critical'):
-                alert = Alert(
-                    alert_type=attack_type,
-                    severity=severity,
-                    ip_address=ip_address,
-                    message=explanation
-                )
-                self.notifier.notify(alert)
-                
-                self.db.add_alert(
-                    attack_type,
-                    severity,
-                    ip_address,
-                    explanation[:500]
-                )
-                
-                logger.warning(f"[ALERT] {attack_type} from {ip_address} - {severity}")
-            
-            # Auto-block if critical and configured
-            if (severity == 'critical' and
-                not self.is_dry_run):
-                
-                if intel.get('is_malicious') or intel.get('threat_score', 0) >= 70:
-                    self.firewall.block_ip(
-                        ip_address,
-                        self.config.get('response', {}).get('block_ttl_seconds', 3600)
-                    )
-                    logger.info(f"[BLOCKED] {ip_address}")
-            
-            # Log detection
-            logger.info(f"[DETECT] {attack_type} | {ip_address} | {severity} | MITRE: {mitre}")
-            
-        except Exception as e:
-            logger.error(f"Event processing error: {e}")
-    
-    def run(self):
-        """Main run loop."""
-        self.running = True
-
-        if self.mode == 'inline':
-            self._run_inline_mode()
-            return
-
-        if self.mode == 'local':
-            self._run_local_mode()
-            return
-
-        # Legacy monitor mode
+    def _start_capture(self):
         self.tracer.start()
-
         if self.sniffer:
             self.sniffer.start()
         if self.syslog_server:
             self.syslog_server.start()
-
-        sleep_time = self.config.get('main_loop', {}).get('cycle_seconds', 60)
-
-        logger.info(f"[Config] Mode: {self.config.get('mode', 'production')}")
-        logger.info(f"[Config] Detection: {'eBPF' if self.tracer.is_using_ebpf() else 'Log-based'}")
-        logger.info(f"[Config] Cycle: {sleep_time}s")
-
         self.cli_dashboard.start()
 
-        try:
-            while self.running:
-                # Daily cleanup
-                if datetime.now().hour == 3:
-                    cleanup_days = self.config.get('database', {}).get('cleanup_days', 30)
-                    self.db.cleanup_old_data(cleanup_days)
-                    logger.info("[Cleanup] Old data removed")
+    def _block_ip(self, ip: str, reason: str = ""):
+        self.firewall.block_ip(ip, ttl_seconds=3600)
 
-                # Honeypot/Honeyfile detection
-                self._detect_honeypot_events()
-
-                # ML baseline learning (occasional)
-                self._learn_baselines()
-
-                logger.debug(f"[Cycle] Complete, sleeping {sleep_time}s")
-                time.sleep(sleep_time)
-
-        except KeyboardInterrupt:
-            logger.info("LIDRA v3 stopped by user")
-        finally:
-            self.stop()
-    
-    def _run_inline_mode(self):
-        """Run LIDRA in inline bridge mode."""
-        logger.info("=" * 60)
-
-        bridge_ok = False
-        if self.bridge_manager:
-            try:
-                bridge_ok = self.bridge_manager.setup()
-                if bridge_ok:
-                    logger.info("[Bridge] Bridge network setup complete")
-                    self.firewall.setup_bridge_nftables(
-                        self.config.get('bridge', {}).get('bridge_name', 'br_lidra'),
-                        self.config.get('bridge', {}).get('nfqueue_num', 0)
-                    )
-                else:
-                    logger.warning("[Bridge] Bridge setup skipped — traffic will be captured passively")
-            except Exception as e:
-                logger.warning(f"[Bridge] Bridge setup failed ({e}) — falling back to passive capture")
-        else:
-            logger.warning("[Bridge] No bridge manager — packet processing only")
-
-        if self.inline_engine:
-            self.inline_engine.start()
-            logger.info("[InlineEngine] Packet processing started")
-        else:
-            logger.error("[InlineEngine] Not available — cannot process packets")
-            self.running = False
-            return
-
-
-        self._launch_tui()
-
-        cleanup_interval = 300
-        last_cleanup = time.time()
-
-        logger.info(f"[INLINE] Bridge gateway ACTIVE — processing packets")
-        logger.info(f"[INLINE] Press Ctrl+C to stop")
-
-        try:
-            while self.running:
-                now = time.time()
-                if now - last_cleanup > cleanup_interval:
-                    cleanup_days = self.config.get('database', {}).get('cleanup_days', 30)
-                    self.db.cleanup_old_data(cleanup_days)
-                    self.inline_engine.blocklist.cleanup_expired()
-                    logger.info("[Cleanup] Old data and expired blocks removed")
-                    last_cleanup = now
-
-                # Push periodic stats to TUI
-                if self.inline_engine:
-                    stats = self.inline_engine.get_stats()
-                    self._push_tui_event({
-                        "type": "packet",
-                        "data": {
-                            "pkts_per_sec": round(stats.get("packet_rate", 0), 1),
-                            "mbps": round(stats.get("packets_in", 0) * 1500 / 1_000_000, 2),
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                    })
-                    self._push_tui_event({
-                        "type": "stats",
-                        "data": {
-                            "cpu_usage": psutil.cpu_percent(interval=None),
-                            "memory_usage": psutil.virtual_memory().percent,
-                            "active_connections": self.inline_engine.connection_tracker.get_stats().get("active_connections", 0),
-                        }
-                    })
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("LIDRA v3 inline mode stopped by user")
-        finally:
-            self.stop()
-
-    def _launch_tui(self):
-        """Start IPC server and TUI subprocess (shared by inline + local modes)."""
-        self._tui_ipc_server = None
-        if self.tui_data_provider and TUIIPCServer:
-            firewall = getattr(self, 'firewall', None)
-            block_fn = unblock_fn = None
-            if firewall:
-                block_fn = lambda ip, reason: firewall.block_ip(ip, ttl_seconds=3600)
-                unblock_fn = firewall.unblock_ip
-            try:
-                ipc = TUIIPCServer(
-                    snapshot_fn=self.tui_data_provider.get_snapshot,
-                    block_fn=block_fn,
-                    unblock_fn=unblock_fn,
-                )
-                ipc.start()
-                self._tui_ipc_server = ipc
-                logger.info(f"[TUI-IPC] Server at {ipc.socket_path}")
-            except Exception as e:
-                logger.warning(f"[TUI-IPC] Failed to start: {e}")
-
-        tui_process = None
-        if self.config.get('tui', {}).get('enabled', True):
-            try:
-                env = dict(os.environ)
-                if self._tui_ipc_server:
-                    env["LIDRA_TUI_SOCKET"] = self._tui_ipc_server.socket_path
-                tui_process = subprocess.Popen(
-                    [sys.executable, "-m", "src.tui.app", "--standalone"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env,
-                )
-                logger.info(f"[TUI] Textual dashboard launched (PID {tui_process.pid})")
-            except Exception as e:
-                logger.warning(f"[TUI] Failed to launch: {e}")
-        else:
-            logger.info("[TUI] TUI disabled in config")
-        self._tui_process = tui_process
-
-    def _ensure_nfqueue_module(self) -> bool:
-        """Load nfnetlink_queue kernel module if not already loaded."""
-        import os
-        if os.path.exists("/proc/net/netfilter/nfnetlink_queue"):
-            return True
-        try:
-            result = subprocess.run(
-                ["modprobe", "nfnetlink_queue"],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0:
-                # Give the module a moment to register
-                time.sleep(0.5)
-                if os.path.exists("/proc/net/netfilter/nfnetlink_queue"):
-                    logger.info("[NFQUEUE] Kernel module loaded successfully")
-                    return True
-                else:
-                    logger.warning("[NFQUEUE] modprobe succeeded but /proc entry missing")
-                    return False
-            else:
-                logger.warning(f"[NFQUEUE] modprobe failed: {result.stderr.strip()}")
-                return False
-        except Exception as e:
-            logger.warning(f"[NFQUEUE] Failed to load kernel module: {e}")
-            return False
-
-    def _run_local_mode(self):
-        logger.info("=" * 60)
-        logger.info("[LOCAL] AF_PACKET + iptables DROP — NFQUEUE skipped (breaks WiFi on Kali)")
-
-        if self.inline_engine:
-            self.inline_engine.start()
-            logger.info("[InlineEngine] Packet processing started")
-        else:
-            logger.error("[InlineEngine] Not available — cannot process packets")
-            self.running = False
-            return
-
-        if self.tracer:
-            self.tracer.start()
-            logger.info("[Tracer] Log file monitoring started")
-
-        self._launch_tui()
-
-        cleanup_interval = 300
-        last_cleanup = time.time()
-
-        iface = self.inline_engine._get_interface() if self.inline_engine else "unknown"
-        logger.info(f"[LOCAL] Inline detection ACTIVE — AF_PACKET on {iface}")
-        logger.info(f"[LOCAL] Press Ctrl+C to stop")
-
-        try:
-            while self.running:
-                now = time.time()
-                if now - last_cleanup > cleanup_interval:
-                    cleanup_days = self.config.get('database', {}).get('cleanup_days', 30)
-                    self.db.cleanup_old_data(cleanup_days)
-                    if self.inline_engine:
-                        self.inline_engine.blocklist.cleanup_expired()
-                    logger.info("[Cleanup] Old data and expired blocks removed")
-                    last_cleanup = now
-
-                if self.inline_engine:
-                    stats = self.inline_engine.get_stats()
-                    self._push_tui_event({
-                        "type": "packet",
-                        "data": {
-                            "pkts_per_sec": round(stats.get("packet_rate", 0), 1),
-                            "mbps": round(stats.get("packets_in", 0) * 1500 / 1_000_000, 2),
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                    })
-                    self._push_tui_event({
-                        "type": "stats",
-                        "data": {
-                            "cpu_usage": psutil.cpu_percent(interval=None),
-                            "memory_usage": psutil.virtual_memory().percent,
-                            "active_connections": self.inline_engine.connection_tracker.get_stats().get("active_connections", 0),
-                        }
-                    })
-                time.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("LIDRA v3 local mode stopped by user")
-        finally:
-            self.stop()
-
-    def _learn_baselines(self):
-        """Periodically learn normal behavior patterns."""
-        # This would learn from historical data
-        # Skipped for v1 - can be added later
-
-    def _detect_honeypot_events(self):
-        """Detect honeypot and honeyfile hits."""
-        import os
-
-        honeypot_log = BASE / self.config.get('deception', {}).get('honeypot_log', 'logs/honeypot.log')
-        state_file = BASE / self.config.get('deception', {}).get('state_file', 'state/honeypot_processed.txt')
-
-        processed_ips = set()
-        if state_file.exists():
-            with open(state_file) as f:
-                processed_ips = {line.strip() for line in f if line.strip()}
-
-        new_ips = []
-
-        if honeypot_log.exists():
-            with open(honeypot_log) as f:
-                for line in f:
-                    if "[HIT]" in line:
-                        parts = line.split()
-                        for i, part in enumerate(parts):
-                            if part == "from" and i + 1 < len(parts):
-                                ip = parts[i + 1].rstrip(",")
-                                if ip and ip not in processed_ips:
-                                    new_ips.append(ip)
-                                    self._process_honeypot_detection(ip, "honeypot_connection")
-
-        last_processed = 0
-        if state_file.exists():
-            try:
-                with open(state_file) as f:
-                    for line in f:
-                        if line.startswith("honeyfile:"):
-                            last_processed = int(line.split(":")[1])
-            except (OSError, ValueError, IOError) as e:
-                logger.warning(f"[Agent] Could not read honeypot state file: {e}")
-
-        conn = self.db._get_connection()
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT id, ip_address, file_path FROM honeyfile_hits WHERE id > ?", (last_processed,))
-        new_honeyfile_hits = cursor.fetchall()
-
-        for hit_id, ip, file_path in new_honeyfile_hits:
-            if ip:
-                self._process_honeypot_detection(ip, "honeyfile_access", {"file_path": file_path})
-
-        if new_ips or new_honeyfile_hits:
-            with open(state_file, "a") as f:
-                for ip in new_ips:
-                    f.write(f"{ip}\n")
-                if new_honeyfile_hits:
-                    max_id = max(h[0] for h in new_honeyfile_hits)
-                    f.write(f"honeyfile:{max_id}\n")
-
-    def _process_honeypot_detection(self, ip: str, attack_type: str, details: Dict = None):
-        """Process honeypot/honeyfile detection and create alert."""
-
-        detection = {
-            "attack_type": attack_type,
-            "severity": "critical",
-            "mitre": ["T1595", "T1589"] if attack_type == "honeypot_connection" else ["T1595", "T1083"],
-            "details": details or {}
-        }
-
-        attacker_id = self.db.add_attacker(
-            ip,
-            country="",
-            org=""
-        )
-        self.db.record_attack(
-            attacker_id,
-            attack_type,
-            source_log="honeypot",
-            raw_line=f"Deception system detected {attack_type} from {ip}"
-        )
-
-        alert = Alert(
-            alert_type=attack_type,
-            severity="critical",
-            ip_address=ip,
-            message=f"Honeypot/Honeyfile detection: {attack_type} from {ip}"
-        )
-        self.notifier.notify(alert)
-        self.db.add_alert(attack_type, "critical", ip, f"Honeypot/Honeyfile detection from {ip}")
-
-        if not self.is_dry_run:
-            self.firewall.block_ip(ip, f"honeypot_{attack_type}")
-
-        logger.warning(f"[HONEYPOT] {attack_type} from {ip} - auto-blocked")
-
-    # ── Config Hot-Reload ──────────────────────────────────────────────
-    def reload_config(self, new_config: dict):
-        old_mode = self.config.get("mode")
-        new_mode = new_config.get("mode")
-        self.config = new_config
-        if old_mode != new_mode:
-            logger.warning(f"Mode changed from {old_mode} to {new_mode} — restart required for full effect")
-        if self.config.get("general", {}).get("verbose", False):
-            logging.getLogger().setLevel(logging.DEBUG)
-        self.threat_intel = self._init_threat_intel()
-        self.notifier = self._init_alerting()
-        if hasattr(self, "firewall") and self.firewall:
-            self.firewall.dry_run = _config_dry_run(self.config)
-        self._config_mtime = time.time()
-    
-    # ── Lifecycle ──────────────────────────────────────────────────────
-    def stop(self):
-        """Stop LIDRA v3."""
-        self.running = False
-
-        if self.mode in ('inline', 'local'):
-            if self.inline_engine:
-                self.inline_engine.stop()
-                logger.info("[InlineEngine] Stopped")
-            if self.tracer:
-                self.tracer.stop()
-                logger.info("[Tracer] Stopped")
-            if self.bridge_manager:
-                self.bridge_manager.teardown()
-                logger.info("[Bridge] Torn down")
-            if self._tui_process:
-                self._tui_process.terminate()
-                try:
-                    self._tui_process.wait(timeout=3)
-                except Exception as e:
-                    logger.warning(f"[Agent] TUI subprocess not terminating, killing: {e}")
-                    self._tui_process.kill()
-                logger.info("[TUI] Subprocess terminated")
-            if self._tui_ipc_server:
-                self._tui_ipc_server.stop()
-                self._tui_ipc_server = None
-                logger.info("[TUI-IPC] Server stopped")
-            if self.mode == 'inline':
-                self.firewall.teardown_bridge_nftables()
-            elif self.mode == 'local':
-                local_cfg = self.config.get('local', {})
-                queue_num = local_cfg.get('nfqueue_num', 0)
-                self.firewall.teardown_local_iptables(queue_num)
-            self.cli_dashboard.stop()
-            self.db.close()
-            label = "inline" if self.mode == 'inline' else "local"
-            logger.info(f"LIDRA v3 ({label} mode) shutdown complete")
-            return
-
+    def _teardown_capture(self):
         self.tracer.stop()
         if self.sniffer:
             self.sniffer.stop()
         if self.syslog_server:
             self.syslog_server.stop()
-        self.cli_dashboard.stop()
-        self.db.close()
-        logger.info("LIDRA v3 (monitor mode) shutdown complete")
+
+    def _init_collectors(self):
+        collectors = self.config.get('collectors', {})
+        network_enabled = collectors.get('network', {}).get('enabled', True)
+        syslog_enabled = collectors.get('syslog', {}).get('enabled', True)
+        if network_enabled:
+            interface = collectors.get('network', {}).get('interface') or detect_interface()
+            self.sniffer = create_sniffer(interface=interface, callback=self._on_network_event)
+        if syslog_enabled:
+            port = collectors.get('syslog', {}).get('port', 514)
+            self.syslog_server = create_syslog_server(port=port, callback=self._on_syslog_event)
+
+    def _on_network_event(self, event):
+        if not event or "attack_type" not in event:
+            return
+        logger.warning(f"[NETWORK] {event['attack_type']} from {event.get('source_ip', 'unknown')}")
+        self._process_network_detection(event)
+
+    def _on_syslog_event(self, event):
+        if not event or "attack_type" not in event:
+            return
+        logger.warning(f"[SYSLOG] {event['attack_type']} from {event.get('source_ip', 'unknown')}")
+        self._process_network_detection(event)
+
+    def _process_network_detection(self, detection: Dict):
+        try:
+            attack_type = detection.get('attack_type', 'unknown')
+            severity = detection.get('severity', 'medium')
+            source_ip = detection.get('source_ip', 'unknown')
+            if source_ip == 'unknown':
+                return
+            whitelist = self.config.get('whitelist', [])
+            if source_ip in whitelist:
+                return
+            attacker_id = self.db.add_attacker(source_ip, "", "")
+            self.db.record_attack(attacker_id, attack_type, source_log='network', raw_line=detection.get('details', ''), severity=severity)
+            if severity in ('high', 'critical'):
+                # ponytail: no_block suppresses BLOCKING only — alerts still
+                # fire (same insider-signal reasoning as agent_base).
+                if self._alert_throttle.allow(attack_type, source_ip):
+                    alert = Alert(alert_type=attack_type, severity=severity, ip_address=source_ip, message=detection.get('details', attack_type))
+                    self.notifier.notify(alert)
+                    self.db.add_alert(attack_type, severity, source_ip, detection.get('details', '')[:500])
+                no_block = self.config.get("no_block", [])
+                if source_ip not in no_block:
+                    if not self.is_dry_run:
+                        reason = f"network_{attack_type}"
+                        if self.firewall.block_ip(source_ip, ttl_seconds=3600):
+                            try:
+                                block_id = self.db.add_block(source_ip, reason)
+                                self.db.mark_block_applied(block_id)
+                            except Exception as e:
+                                logger.error(f"Block persist error: {e}")
+        except Exception as e:
+            logger.error(f"Network detection processing error: {e}")
+
+    def run(self):
+        self.running = True
+        self.tracer.start()
+        if self.sniffer:
+            self.sniffer.start()
+        if self.syslog_server:
+            self.syslog_server.start()
+        sleep_time = self.config.get('main_loop', {}).get('cycle_seconds', 60)
+        self.cli_dashboard.start()
+        try:
+            while self.running:
+                if datetime.now().hour == 3:
+                    self.db.cleanup_old_data(self.config.get('database', {}).get('cleanup_days', 30))
+                self._detect_honeypot_events()
+                time.sleep(sleep_time)
+        except KeyboardInterrupt:
+            logger.info("LIDRA v3 monitor mode stopped by user")
+        finally:
+            self.stop()
 
 
 def main():
     """Entry point with signal handling and PID file."""
+    import argparse
+    parser = argparse.ArgumentParser(description="LIDRA v3 — eBPF-Powered Detection System")
+    parser.add_argument("--demo", action="store_true", help="Auto-fire synthetic demo attacks into the TUI")
+    parser.add_argument("--mode", choices=["laptop", "gateway"], default=None, help="Override config mode")
+    parser.add_argument("--tui", dest="tui", action="store_true", default=None, help="Launch the TUI")
+    parser.add_argument("--no-tui", dest="tui", action="store_false", help="Run headless (no TUI)")
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true", default=None, help="Detect only, never block")
+    parser.add_argument("--no-dry-run", dest="dry_run", action="store_false", help="Allow real blocking")
+    parser.add_argument("--verbose", action="store_true", help="DEBUG logging")
+    parser.add_argument("--interface", default=None, help="Capture interface (overrides config)")
+    args = parser.parse_args()
+
+    _setup_logging(verbose=args.verbose)
+    _require_root()
+
     (BASE / "data").mkdir(exist_ok=True)
     (BASE / "logs").mkdir(exist_ok=True)
     (BASE / "state").mkdir(exist_ok=True)
@@ -1014,7 +248,6 @@ def main():
     metrics_srv = MetricsServer(port=metrics_port, cert_path=metrics_cert, key_path=metrics_key)
     metrics_srv.start()
 
-    import socket as _socket
     pid_path = None
     for candidate in (Path("/var/run/lidra/lidra.pid"), Path("/run/lidra/lidra.pid")):
         try:
@@ -1036,6 +269,20 @@ def main():
             logger.warning(f"Could not write PID file: {e}")
 
     config = load_central_config()
+    if args.demo:
+        config["demo"] = True
+    if args.mode:
+        # Normalise user-friendly CLI names to internal mode strings
+        mode_map = {"laptop": "local", "gateway": "inline"}
+        config["mode"] = mode_map.get(args.mode, args.mode)
+    if args.tui is not None:
+        config.setdefault("tui", {})["enabled"] = args.tui
+    if args.dry_run is not None:
+        config.setdefault("response", {})["dry_run"] = args.dry_run
+    if args.verbose:
+        config.setdefault("general", {})["verbose"] = True
+    if args.interface:
+        config.setdefault("collectors", {}).setdefault("network", {})["interface"] = args.interface
     lidra = LIDRAv3(config)
 
     def _shutdown(signum, frame):
@@ -1056,6 +303,11 @@ def main():
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGHUP, _reload)
+
+    if args.demo:
+        from demo_injector import inject_demo_events
+        inject_demo_events(lidra, delay=3.0)
+
     lidra.run()
 
 

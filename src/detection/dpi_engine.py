@@ -2,14 +2,13 @@ import logging
 import re
 import base64
 from typing import Dict, List, Optional
-from dataclasses import dataclass, field
-from urllib.parse import unquote, unquote_plus, parse_qs
+from dataclasses import dataclass
+from urllib.parse import unquote_plus, parse_qs
 
 from utils.config_loader import get_cfg
 from detection.fingerprint.tls_fingerprinter import TLSFingerprinter
 from detection.anomaly.smuggling_detector import SmugglingDetector
 from detection.detector.dns_tunnel_detector import DNSTunnelDetector
-from detection.countermeasures.evasion import normalize_unicode
 
 logger = logging.getLogger(__name__)
 
@@ -85,25 +84,20 @@ class DPIEngine:
         looks_http = first_four in (b"GET ", b"POST", b"PUT ", b"DEL ", b"PATC",
                                     b"HEAD", b"OPTI", b"CONN", b"TRAC") or \
                      b"HTTP/" in stream_data[:64]
-        logger.debug(f"[DPI] inspect_stream protocol={protocol} looks_http={looks_http} data_len={len(stream_data)}")
+        # ponytail: lazy %s-args — this runs per held packet; f-strings
+        # format eagerly even when DEBUG is off, taxing every verdict.
+        logger.debug("[DPI] inspect_stream protocol=%s looks_http=%s data_len=%d", protocol, looks_http, len(stream_data))
         if protocol == "http" or looks_http:
             parsed = self._parse_http(stream_data)
-            logger.debug(f"[DPI] _parse_http result={'OK' if parsed else 'FAIL'}")
+            logger.debug("[DPI] _parse_http result=%s", 'OK' if parsed else 'FAIL')
             if parsed:
                 result = self._check_web_attack(parsed)
                 if result:
                     return result
         if protocol == "dns":
-            parsed = self._parse_dns(stream_data)
-            if parsed:
-                dns_result = DPIResult(
-                    attack_type="dns_anomaly",
-                    severity="low",
-                    details=f"DNS query: {parsed.get('query', 'unknown')}",
-                    confidence=0.5,
-                    mitre=["T1572"],
-                )
-                return dns_result
+            # ponytail: tunnel check FIRST — tunneled queries are well-formed
+            # DNS, so an early "parsed OK" return made this unreachable. Clean
+            # queries return None (no noise); only tunnel hits alert.
             dns_tunnel_result = self._dns_tunnel.analyze({
                 "protocol": "dns",
                 "payload": stream_data,
@@ -206,35 +200,10 @@ class DPIEngine:
             logger.warning(f"[DPI] _parse_http failed: {e}")
             return None
 
-    def _parse_dns(self, data: bytes) -> Optional[Dict]:
-        try:
-            import dns.message
-            msg = dns.message.from_wire(data)
-            if msg.question:
-                return {"query": str(msg.question[0].name), "type": str(msg.question[0].rdtype)}
-        except ImportError:
-            l = len(data)
-            if l > 12:
-                qname_start = 12
-                qname_parts = []
-                while qname_start < l:
-                    label_len = data[qname_start]
-                    if label_len == 0:
-                        break
-                    qname_start += 1
-                    if qname_start + label_len <= l:
-                        qname_parts.append(data[qname_start:qname_start + label_len].decode("ascii", errors="replace"))
-                        qname_start += label_len
-                    else:
-                        break
-                if qname_parts:
-                    return {"query": ".".join(qname_parts)}
-        except Exception as e:
-            logger.warning(f"[DPI] DNS parse failed: {e}")
-        return None
-
     def _parse_tls(self, data: bytes) -> Optional[Dict]:
-        if len(data) < 5:
+        # ponytail: needs 6 bytes — data[5] below. <6 raised IndexError on
+        # short payloads labelled tls (e.g. 5-byte records on 443).
+        if len(data) < 6:
             return None
         content_type = data[0]
         if content_type != 0x16:
@@ -258,16 +227,23 @@ class DPIEngine:
         ext_len = int.from_bytes(data[offset:offset + 2], "big")
         offset += 2
         end = offset + ext_len
+        # Bounds check: ext_len must not exceed remaining data
+        if end > len(data):
+            return None
         sni = ""
         while offset + 4 <= end:
             ext_type = int.from_bytes(data[offset:offset + 2], "big")
             ext_len = int.from_bytes(data[offset + 2:offset + 4], "big")
             offset += 4
-            if ext_type == 0x00 and offset + 5 <= offset + ext_len:
-                sni_len = int.from_bytes(data[offset + 2:offset + 4], "big")
-                offset_sni = offset + 4
-                sni = data[offset_sni:offset_sni + sni_len].decode("ascii", errors="replace")
-                break
+            # Bounds check: SNI extension must fit in remaining data
+            if ext_type == 0x00:
+                if offset + 5 <= end and offset + 4 <= len(data):
+                    sni_len = int.from_bytes(data[offset + 2:offset + 4], "big")
+                    offset_sni = offset + 4
+                    # Bounds check: SNI data must fit in buffer
+                    if offset_sni + sni_len <= len(data):
+                        sni = data[offset_sni:offset_sni + sni_len].decode("ascii", errors="replace")
+                    break
             offset += ext_len
         return {"sni": sni} if sni else None
 
@@ -341,33 +317,6 @@ class DPIEngine:
                 break
         return current, encodings
 
-    @staticmethod
-    def _deep_decode(text: str, max_depth: int = 10) -> str:
-        current = text
-        for _ in range(max_depth):
-            prev = current
-            current = unquote_plus(current)
-            current = _UNICODE_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
-            current = _HEX_ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
-            current = _HEX_ENTITY_RE.sub(lambda m: chr(int(m.group(1), 16)), current)
-            current = _DEC_ENTITY_RE.sub(lambda m: chr(int(m.group(1))), current)
-            for name, char in _NAMED_ENTITIES.items():
-                current = current.replace(name, char)
-            current = _UTF7_B64_RE.sub(_decode_utf7, current)
-            current = _SQL_COMMENT_RE.sub('', current)
-            try:
-                b64_candidates = re.findall(r'[A-Za-z0-9+/]{8,}={0,2}', current)
-                for cand in b64_candidates:
-                    if _looks_like_b64(cand):
-                        decoded = base64.b64decode(cand).decode("utf-8", errors="replace")
-                        if _has_printable_content(decoded):
-                            current = current.replace(cand, decoded, 1)
-            except Exception as e:
-                logger.warning(f"[DPI] Base64 decode failed: {e}")
-            if current == prev:
-                break
-        return current
-
     def _check_web_attack(self, parsed: Dict) -> Optional[DPIResult]:
         uri = parsed.get("uri", "")
         body = parsed.get("body", "")
@@ -375,11 +324,11 @@ class DPIEngine:
         decoded_uri = self._decode(uri)
         decoded_body = self._decode(body)
 
-        logger.debug(f"[DPI] _check_web_attack uri={uri} body_len={len(body)} decoded_uri={decoded_uri[:100]}")
+        logger.debug("[DPI] _check_web_attack uri=%s body_len=%d decoded_uri=%s", uri, len(body), decoded_uri[:100])
         sqli_check = self._detect_sqli(decoded_body) or self._detect_sqli(decoded_uri)
         xss_check = self._detect_xss(decoded_body) or self._detect_xss(decoded_uri)
         cmdi_check = self._detect_cmd_injection(decoded_body) or self._detect_cmd_injection(decoded_uri)
-        logger.debug(f"[DPI] checks: sqli={sqli_check} xss={xss_check} cmdi={cmdi_check}")
+        logger.debug("[DPI] checks: sqli=%s xss=%s cmdi=%s", sqli_check, xss_check, cmdi_check)
 
         if sqli_check:
             return DPIResult("sql_injection", "critical", f"SQLi in {uri}", 0.9, ["T1190"])
@@ -404,7 +353,8 @@ class DPIEngine:
         r = self._detect_websocket_upgrade(parsed.get("headers", {}))
         if r:
             return r
-        chunked = self._detect_chunked_encoding(body)
+        headers = parsed.get("headers", {})
+        chunked = self._detect_chunked_encoding(headers, body)
         if chunked and chunked != body:
             for part in self._detect_multipart(parsed.get("headers", {}), chunked):
                 decoded = self._decode(part)
@@ -463,11 +413,6 @@ class DPIEngine:
         scanner_agents = _get_scanner_agents()
         return any(s in ua.lower() for s in scanner_agents)
 
-    def _parse_http_params(self, uri: str) -> List[str]:
-        qs = uri.split("?", 1)[-1]
-        params = parse_qs(qs, keep_blank_values=True)
-        return [v for vals in params.values() for v in vals]
-
     def _detect_hpp(self, uri: str) -> Optional[DPIResult]:
         qs = uri.split("?", 1)
         if len(qs) < 2:
@@ -482,8 +427,9 @@ class DPIEngine:
                             f"HPP in param {key}: {vals}", 0.85, ["T1190"])
         return None
 
-    def _detect_chunked_encoding(self, body: str) -> Optional[str]:
-        if "transfer-encoding" not in body.lower():
+    def _detect_chunked_encoding(self, headers: Dict, body: str) -> Optional[str]:
+        te = headers.get("transfer-encoding", "").lower()
+        if "chunked" not in te:
             return None
         import re as _re
         chunks = _re.findall(r'([0-9a-fA-F]+)\r\n(.*?)\r\n', body, _re.DOTALL)

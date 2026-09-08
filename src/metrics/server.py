@@ -29,10 +29,15 @@ else:
     detection_latency = None
 
 class MetricsServer:
-    def __init__(self, port: int = 8080, cert_path: str = None, key_path: str = None):
+    def __init__(self, port: int = 8080, cert_path: str = None, key_path: str = None,
+                 host: str = None):
+        import os as _os
         self.port = port
         self.cert_path = cert_path
         self.key_path = key_path
+        # ponytail: LIDRA_METRICS_HOST=127.0.0.1 binds localhost-only.
+        # Default stays 0.0.0.0 (compose/prometheus scrape); README documents it.
+        self.host = host or _os.environ.get("LIDRA_METRICS_HOST", "0.0.0.0")
         self._thread = None
         self._httpd = None
 
@@ -47,18 +52,18 @@ class MetricsServer:
                     import ssl
                     from prometheus_client.exposition import make_wsgi_app
                     app = make_wsgi_app()
-                    httpd = make_server("0.0.0.0", self.port, app)
+                    httpd = make_server(self.host, self.port, app)
                     httpd.socket = ssl.wrap_socket(
                         httpd.socket,
                         certfile=self.cert_path,
                         keyfile=self.key_path,
                         server_side=True,
                     )
-                    logger.info(f"Metrics server (TLS) on 0.0.0.0:{self.port}/metrics")
+                    logger.info(f"Metrics server (TLS) on {self.host}:{self.port}/metrics")
                     httpd.serve_forever()
                 else:
-                    start_http_server(self.port)
-                    logger.info(f"Metrics server on 0.0.0.0:{self.port}/metrics")
+                    start_http_server(self.port, addr=self.host)
+                    logger.info(f"Metrics server on {self.host}:{self.port}/metrics")
             except Exception as e:
                 logger.warning(f"Metrics server failed to start: {e}")
         self._thread = threading.Thread(target=_serve, daemon=True)

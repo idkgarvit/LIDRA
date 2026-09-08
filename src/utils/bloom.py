@@ -1,6 +1,5 @@
 import hashlib
 import math
-from typing import Callable, Optional
 
 
 class BloomFilter:

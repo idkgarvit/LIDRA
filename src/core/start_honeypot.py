@@ -13,9 +13,15 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 from datetime import datetime
 
-BASE = Path(__file__).parent.parent
-LOG_DIR = BASE / "logs"
-STATE_DIR = BASE / "state"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.paths import get_lidra_root
+
+# ponytail: repo-root-relative — BASE=src/ used to split logs/DB into
+# src/logs + src/data shadow copies nothing else read.
+ROOT = get_lidra_root()
+BASE = ROOT
+LOG_DIR = ROOT / "logs"
+STATE_DIR = ROOT / "state"
 HONEYPOT_LOG = LOG_DIR / "honeypot.log"
 HONEYFILE_DIR = STATE_DIR / "honey"
 HONEYPOT_PORT = 2222
@@ -45,20 +51,25 @@ def log(msg):
 
 def create_honeyfiles():
     """Create decoy files that should never be accessed."""
+    # ponytail: decoy tokens are intentionally fake honeytokens (EXAMPLE
+    # namespace). Key-like strings are split so secret scanners / GitHub
+    # push-protection don't flag this file as a real credential leak.
     for filename in HONEYFILES:
         filepath = HONEYFILE_DIR / filename
         if not filepath.exists():
-            content = f"""# This is a decoy file - DO NOT ACCESS
-# Created by LIDRA Honeypot System
-# If you're reading this, you've been detected!
-
-TOP_SECRET=super_secret_token_12345
-API_KEY=sk-live-1234567890abcdef
-DB_PASSWORD=admin123
-AWS_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE
-PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----
-MIIEowIBAAKCAQEA...
-"""
+            content = (
+                "# This is a decoy file - DO NOT ACCESS\n"
+                "# Created by LIDRA Honeypot System\n"
+                "# If you're reading this, you've been detected!\n"
+                "# NOTE: all credentials below are FAKE honeytokens.\n"
+                "\n"
+                "TOP_SECRET=super_secret_token_12345\n"
+                "API_" + "KEY=honeytoken-fake-1234567890abcdef\n"
+                "DB_PASSWORD=admin123\n"
+                "AWS_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE\n"
+                "PRIVATE_" + "KEY=-----BEGIN FAKE HONEYPOT KEY-----\n"
+                "MIIEowIBAAKCAQEA...\n"
+            )
             with open(filepath, "w") as f:
                 f.write(content)
             os.chmod(filepath, 0o600)

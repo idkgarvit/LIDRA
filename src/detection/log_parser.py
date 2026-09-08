@@ -36,16 +36,19 @@ class LogParser:
     PATTERNS = {
         # SSH authentication
         'ssh_failed': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+sshd\[\d+\]:\s+Failed\s+password\s+for\s+(?P<user>\S+)\s+from\s+(?P<ip>[\d.]+)\s+port\s+(?P<port>\d+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+Failed\s+password\s+for\s+(?:invalid\s+user\s+)?(?P<user>\S+)\s+from\s+(?P<ip>[\d.]+)\s+port\s+(?P<port>\d+)'
+            # ponytail: sshd logs "Failed password for invalid user X" for
+            # nonexistent accounts — without the optional group those lines
+            # matched nothing and never fed the brute-force counter.
         ),
         'ssh_accepted': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+sshd\[\d+\]:\s+Accepted\s+\S+\s+for\s+(?P<user>\S+)\s+from\s+(?P<ip>[\d.]+)\s+port\s+(?P<port>\d+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+Accepted\s+\S+\s+for\s+(?P<user>\S+)\s+from\s+(?P<ip>[\d.]+)\s+port\s+(?P<port>\d+)'
         ),
         'ssh_invalid_user': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+sshd\[\d+\]:\s+Invalid\s+user\s+(?P<user>\S+)\s+from\s+(?P<ip>[\d.]+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+Invalid\s+user\s+(?P<user>\S+)\s+from\s+(?P<ip>[\d.]+)'
         ),
         'ssh_connection_closed': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+sshd\[\d+\]:\s+Connection\s+closed\s+by\s+(?P<ip>[\d.]+)\s+port\s+(?P<port>\d+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+sshd(?:-session)?\[\d+\]:\s+Connection\s+closed\s+by\s+(?:authenticating user \S+ )?(?P<ip>[\d.]+)\s+port\s+(?P<port>\d+)'
         ),
 
         # Web server attacks (Apache/Nginx combined format)
@@ -64,30 +67,30 @@ class LogParser:
         ),
 
         'postgres_failed': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+postgres\[\d+\]:\s+.*FATAL:\s+password\s+authentication\s+failed\s+for\s+user\s+"(?P<user>\S+)".*\s+host=(?P<ip>[\d.]+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+postgres\[\d+\]:\s+.*FATAL:\s+password\s+authentication\s+failed\s+for\s+user\s+"(?P<user>\S+)".*\s+host=(?P<ip>[\d.]+)'
         ),
 
         # Postfix (SMTP)
         'postfix_sasl': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+postfix/smtpd\[\d+\]:\s+warning:\s+\S+\[(?P<ip>[\d.]+)\]:\s+SASL\s+\S+\s+authentication\s+failed'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+postfix/smtpd\[\d+\]:\s+warning:\s+\S+\[(?P<ip>[\d.]+)\]:\s+SASL\s+\S+\s+authentication\s+failed'
         ),
 
         # Dovecot (IMAP/POP3)
         'dovecot_failed': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+dovecot:\s+auth:\s+Error:\s+Password\s+verification\s+failed\s+for\s+user\s+(?P<user>\S+):\s+.*\s+rip=(?P<ip>[\d.]+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+dovecot:\s+auth:\s+Error:\s+Password\s+verification\s+failed\s+for\s+user\s+(?P<user>\S+):\s+.*\s+rip=(?P<ip>[\d.]+)'
         ),
 
         'pop3_failed': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+dovecot:\s+(?:pop3|pop3-login):\s+.*Password\s+verification\s+failed\s+for\s+user\s+(?P<user>\S+).*\s+rip=(?P<ip>[\d.]+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+dovecot:\s+(?:pop3|pop3-login):\s+.*Password\s+verification\s+failed\s+for\s+user\s+(?P<user>\S+).*\s+rip=(?P<ip>[\d.]+)'
         ),
 
         # vsftpd/proftpd (FTP)
         'ftp_failed': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+\S+ftp[d]?\[\d+\]:\s+\S+\s+FAIL\s+Login\s+from\s+(?P<ip>[\d.]+)\s+for\s+\'(?P<user>\S+)\''
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+\S+ftp[d]?\[\d+\]:\s+\S+\s+FAIL\s+Login\s+from\s+(?P<ip>[\d.]+)\s+for\s+\'(?P<user>\S+)\''
         ),
 
         'ftp_anonymous': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+\S+ftp[d]?\[\d+\]:\s+.*ANONYMOUS\s+LOGIN.*\s+(?P<ip>[\d.]+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+\S+ftp[d]?\[\d+\]:\s+.*ANONYMOUS\s+LOGIN.*\s+(?P<ip>[\d.]+)'
         ),
 
         # MongoDB unauthorized
@@ -107,32 +110,32 @@ class LogParser:
 
         # sudo failures
         'sudo_failed': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+sudo:\s+(?P<user>\S+)\s+:\s+.*\s+COMMAND=.*\s+USER=\S+\s+TTY=\S+\s+PWD=\S+\s+WORKDIR=\S+'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+sudo:\s+(?P<user>\S+)\s+:\s+.*\s+COMMAND=.*\s+USER=\S+\s+TTY=\S+\s+PWD=\S+\s+WORKDIR=\S+'
         ),
         
         # sudo usage (for tracking)
         'sudo_used': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+sudo:\s+(?P<user>\S+)\s+:\s+TTY=\S+\s+PWD=\S+\s+USER=\S+\s+COMMAND=(?P<cmd>.+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+sudo:\s+(?P<user>\S+)\s+:\s+TTY=\S+\s+PWD=\S+\s+USER=\S+\s+COMMAND=(?P<cmd>.+)'
         ),
         
         # Auth failures (generic)
         'auth_failure': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+(?:sshd|login|pam)\[\d+\]:\s+FAILED\s+(?:login|authentication)\s+for\s+(?P<user>\S+)\s+from\s+(?P<ip>[\d.]+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+(?:sshd|login|pam)\[\d+\]:\s+FAILED\s+(?:login|authentication)\s+for\s+(?P<user>\S+)\s+from\s+(?P<ip>[\d.]+)'
         ),
         
         # Service failures
         'service_failure': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+systemd\[\d+\]:\s+(?P<service>\S+).*failed'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+systemd\[\d+\]:\s+(?P<service>\S+).*failed'
         ),
         
         # Disk errors (potential ransomware)
         'disk_error': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+(?:kernel|ext4|xfs).*:\s+(?:I/O|read|write)\s+error'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+(?:kernel|ext4|xfs).*:\s+(?:I/O|read|write)\s+error'
         ),
         
         # Network anomalies
         'network_anomaly': re.compile(
-            r'(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+\S+\s+kernel:.*:\s+.*(drop|block|reject|deny).*\s+(?P<ip>[\d.]+)'
+            r'(?P<timestamp>\w+\s+\d+\s+[\d:.]+)\s+\S+\s+kernel:.*:\s+.*(drop|block|reject|deny).*\s+(?P<ip>[\d.]+)'
         ),
     }
 
@@ -303,6 +306,9 @@ class LogParser:
     def _parse_timestamp(self, ts_str: str) -> Optional[datetime]:
         """Parse various timestamp formats."""
         t = ts_str.strip()
+        # ponytail: journalctl --output=short-precise appends .microseconds
+        # ("Sep 05 12:36:53.510391") — strip before strptime.
+        t = re.sub(r'(\d{2}:\d{2}:\d{2})\.\d+', r'\1', t)
         try:
             if 'T' in t:
                 return datetime.strptime(t[:19], '%Y-%m-%dT%H:%M:%S')

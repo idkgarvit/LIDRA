@@ -43,24 +43,14 @@ def get_data_dir() -> Path:
     return d
 
 
-def get_log_dir() -> Path:
-    d = get_lidra_root() / "logs"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def get_state_dir() -> Path:
-    d = get_lidra_root() / "state"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def resolve_secret(category: str, key: str, config_value: Optional[str] = None) -> Optional[str]:
     env_map = {
         ("smtp", "password"): "LIDRA_SMTP_PASSWORD",
         ("abuseipdb", "api_key"): "LIDRA_ABUSEIPDB_KEY",
         ("virustotal", "api_key"): "LIDRA_VT_KEY",
         ("dashboard", "api_key"): "LIDRA_API_KEY",
+        ("slack", "webhook"): "SLACK_WEBHOOK",
+        ("discord", "webhook"): "DISCORD_WEBHOOK",
     }
     env_key = env_map.get((category, key))
     if env_key:

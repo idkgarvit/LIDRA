@@ -32,7 +32,7 @@ echo "Target: $TARGET"
 echo
 
 yellow "[1/4] Single port probe (control - should NOT trigger)..."
-nmap -Pn -p 8080 --max-retries 0 "$TARGET" >/dev/null 2>&1 || true
+nmap -Pn -p 8081 --max-retries 0 "$TARGET" >/dev/null 2>&1 || true
 green "    -> probe sent, no detection expected"
 sleep $SLEEP_BETWEEN
 
@@ -47,7 +47,7 @@ green "    -> UDP probes sent (NB: UDP scan detection is a known gap)"
 sleep $SLEEP_BETWEEN
 
 yellow "[4/4] Service version detection on the open port..."
-nmap -Pn -sV -p 8080 "$TARGET" >/dev/null 2>&1 || true
+nmap -Pn -sV -p 8081 "$TARGET" >/dev/null 2>&1 || true
 green "    -> service probe sent, expect 'port_hopping' (single port but verbose)"
 echo
 

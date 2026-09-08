@@ -51,7 +51,7 @@ docker compose up -d --scale lidra-agent=2
 
 ### Manual (bare metal)
 ```bash
-sudo python3 -m src.lidra_agent_v3
+sudo python3 src/lidra_agent_v3.py
 # or
 lidra
 ```
@@ -60,8 +60,8 @@ lidra
 
 | Action | Command |
 |--------|---------|
-| Start agent | `sudo python3 -m src.lidra_agent_v3` |
-| Start with TUI | `python3 -m src.tui.app` |
+| Start agent | `sudo python3 src/lidra_agent_v3.py` |
+| Start with TUI | `PYTHONPATH=src python3 -m tui.app` |
 | Graceful stop | `Ctrl+C` or `kill -TERM <pid>` |
 | Force stop | `kill -9 <pid>` |
 | Check status | `systemctl status lidra` (if installed) |
@@ -71,7 +71,7 @@ lidra
 LIDRA reloads config on `SIGHUP` without restarting the process:
 
 ```bash
-kill -HUP $(cat /var/run/lidra/lidra.pid)
+kill -HUP $(cat /var/run/lidra/lidra.pid 2>/dev/null || cat state/lidra.pid)
 ```
 
 This re-reads the central YAML config and re-initializes:
@@ -144,7 +144,7 @@ alerts:
 
 ### View live attacks
 ```bash
-python3 -m src.tui.app --standalone
+PYTHONPATH=src python3 -m tui.app --standalone
 ```
 
 ### Inspect blocked IPs
@@ -165,8 +165,8 @@ sudo nft delete element inet filter lidra_blocklist { <IP> }
 
 ### Check database stats
 ```bash
-python3 -c "
-from src.database.db import LIDRADatabase
+PYTHONPATH=src python3 -c "
+from database.db import LIDRADatabase
 db = LIDRADatabase('data/lidra.db')
 print('Attackers:', db.get_attacker_count())
 print('Attacks:', db.get_attack_count())
@@ -177,7 +177,7 @@ print('Alerts:', db.get_alert_count())
 ### Enable verbose logging
 ```bash
 export LIDRA_LOG_LEVEL=DEBUG
-sudo -E python3 -m src.lidra_agent_v3
+sudo -E python3 src/lidra_agent_v3.py
 ```
 
 ## Troubleshooting
@@ -188,10 +188,10 @@ sudo -E python3 -m src.lidra_agent_v3
 [ $(id -u) = 0 ] || echo "Must be root"
 
 # Check config syntax
-python3 -c "from utils.config_loader import load_config; print(load_config())"
+PYTHONPATH=src python3 -c "from utils.config_loader import load_config; print(load_config())"
 
-# Check PID file
-cat /var/run/lidra/lidra.pid 2>/dev/null || echo "No PID file"
+# Check PID file (falls back to state/ for unprivileged runs)
+cat /var/run/lidra/lidra.pid 2>/dev/null || cat state/lidra.pid 2>/dev/null || echo "No PID file"
 ```
 
 ### High CPU usage
@@ -207,7 +207,7 @@ cp data/lidra.db data/lidra.db.bak
 
 # Reset
 rm data/lidra.db
-python3 -c "from database.db import LIDRADatabase; LIDRADatabase('data/lidra.db')"
+PYTHONPATH=src python3 -c "from database.db import LIDRADatabase; LIDRADatabase('data/lidra.db')"
 ```
 
 ### Metrics not showing
@@ -241,7 +241,7 @@ docker compose up -d
 journalctl -u lidra --since "5 minutes ago"
 
 # Run in foreground with debug
-sudo env LIDRA_LOG_LEVEL=DEBUG python3 -m src.lidra_agent_v3
+sudo env LIDRA_LOG_LEVEL=DEBUG python3 src/lidra_agent_v3.py
 
 # Reset state
 rm -rf state/* logs/*
@@ -252,7 +252,7 @@ rm -rf state/* logs/*
 # Teardown and re-create bridge
 sudo nft flush ruleset
 sudo ip link delete br_lidra 2>/dev/null
-sudo python3 -m src.lidra_agent_v3
+sudo python3 src/lidra_agent_v3.py
 ```
 
 ---

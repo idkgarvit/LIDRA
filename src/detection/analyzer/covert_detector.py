@@ -10,9 +10,13 @@ logger = logging.getLogger(__name__)
 
 class CovertDetector:
     def __init__(self, config: dict = None):
-        self._seq_anomalies: Dict[str, List[int]] = defaultdict(list)
-        self._ack_anomalies: Dict[str, List[int]] = defaultdict(list)
-        self._ttl_anomalies: Dict[str, List[int]] = defaultdict(list)
+        # ponytail: bounded deques — unbounded .append + per-packet full
+        # scans (welford over a 300s window) went O(n^2) under flood and
+        # stalled packet verdicts. 64 recent samples cover every threshold
+        # below (max need: 25); 1000-sample baselines stay valid.
+        self._seq_anomalies: Dict[str, deque] = defaultdict(lambda: deque(maxlen=64))
+        self._ack_anomalies: Dict[str, deque] = defaultdict(lambda: deque(maxlen=64))
+        self._ttl_anomalies: Dict[str, deque] = defaultdict(lambda: deque(maxlen=64))
         self._last_cleanup = time.time()
         self._lock = Lock()
         cfg = config or {}
@@ -24,9 +28,13 @@ class CovertDetector:
         self._ttl_window = thresholds.get("ttl_covert_window", 15)
         self._ttl_variations = thresholds.get("ttl_covert_variations", 6)
         self._window = cfg.get("adaptive_window", 300)
-        self._seq_baseline: Dict[str, deque] = defaultdict(deque)
-        self._ack_baseline: Dict[str, deque] = defaultdict(deque)
-        self._ttl_baseline: Dict[str, deque] = defaultdict(deque)
+        self._seq_baseline: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        self._ack_baseline: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        self._ttl_baseline: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        # ponytail: running [n, mean, M2] per (baseline, ip) — reverse-Welford
+        # on expiry keeps 3σ checks O(1). Recomputing over the 1000-entry
+        # window 2×/packet cost 7.4s per 65k SYNs in profiler.
+        self._wstats: Dict[tuple, list] = {}
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
         with self._lock:
@@ -66,47 +74,56 @@ class CovertDetector:
 
         return detections if detections else None
 
-    def _prune(self, dq, now=None):
-        if now is None:
-            now = time.time()
+    @staticmethod
+    def _evict(stats, x):
+        # ponytail: single removal path — both time-expiry and maxlen-eviction
+        # must reverse-update, else stats desync from deque contents.
+        n, mean, m2 = stats
+        if n > 1:
+            delta = x - mean
+            mean -= delta / (n - 1)
+            m2 -= delta * (x - mean)
+            n -= 1
+        else:
+            n, mean, m2 = 0, 0.0, 0.0
+        stats[:] = [n, mean, m2 if m2 > 0 else 0.0]
+
+    def _prune(self, dq, stats, now):
         cutoff = now - self._window
         while dq and dq[0][0] < cutoff:
-            dq.popleft()
-
-    @staticmethod
-    def _welford_stats(seq):
-        n = 0
-        mean = 0.0
-        m2 = 0.0
-        for _, x in seq:
-            n += 1
-            delta = x - mean
-            mean += delta / n
-            m2 += delta * (x - mean)
-        if n < 2:
-            return mean, 0.0
-        variance = m2 / (n - 1)
-        return mean, math.sqrt(variance)
+            _, x = dq.popleft()
+            self._evict(stats, x)
 
     def _is_adaptive_outlier(self, ip, baseline_map, value, now=None):
         if now is None:
             now = time.time()
         dq = baseline_map[ip]
-        self._prune(dq, now)
+        key = (id(baseline_map), ip)
+        stats = self._wstats.get(key)
+        if stats is None:
+            stats = [0, 0.0, 0.0]
+            self._wstats[key] = stats
+        self._prune(dq, stats, now)
+        n, mean, m2 = stats
         outlier = False
-        if len(dq) >= 3:
-            mean, std = self._welford_stats(dq)
-            if std == 0:
-                outlier = value != mean
-            else:
-                outlier = abs(value - mean) > 3 * std
+        if n >= 3:
+            std = math.sqrt(m2 / (n - 1)) if m2 > 0 else 0.0
+            outlier = (value != mean) if std == 0 else abs(value - mean) > 3 * std
+        n += 1
+        delta = value - mean
+        mean += delta / n
+        m2 += delta * (value - mean)
+        stats[:] = [n, mean, m2]
+        if len(dq) == dq.maxlen:
+            _, x = dq.popleft()
+            self._evict(stats, x)
         dq.append((now, value))
         return outlier
 
     def _check_seq_covert(self, ip, seq):
         last_bytes = seq & 0xFF
         self._seq_anomalies[ip].append(last_bytes)
-        recent = self._seq_anomalies[ip][-25:]
+        recent = list(self._seq_anomalies[ip])[-25:]
         adaptive_hit = self._is_adaptive_outlier(ip, self._seq_baseline, last_bytes)
         if len(recent) >= self._seq_samples:
             chars = []
@@ -128,7 +145,7 @@ class CovertDetector:
             return None
         last_bytes = ack & 0xFF
         self._ack_anomalies[ip].append(last_bytes)
-        recent = self._ack_anomalies[ip][-25:]
+        recent = list(self._ack_anomalies[ip])[-25:]
         adaptive_hit = self._is_adaptive_outlier(ip, self._ack_baseline, last_bytes)
         if len(recent) >= self._ack_samples:
             chars = []
@@ -147,7 +164,7 @@ class CovertDetector:
 
     def _check_ttl_covert(self, ip, ttl):
         self._ttl_anomalies[ip].append(ttl)
-        recent = self._ttl_anomalies[ip][-self._ttl_window:]
+        recent = list(self._ttl_anomalies[ip])[-self._ttl_window:]
         adaptive_hit = self._is_adaptive_outlier(ip, self._ttl_baseline, ttl)
         if len(recent) >= self._ttl_window and len(set(recent)) >= self._ttl_variations and adaptive_hit:
             return {"attack_type": "ttl_covert_channel", "severity": "medium", "source_ip": ip,
@@ -180,10 +197,14 @@ class CovertDetector:
             self._ack_anomalies.clear()
             self._ttl_anomalies.clear()
             now = time.time()
-            for dq in self._seq_baseline.values():
-                self._prune(dq, now)
-            for dq in self._ack_baseline.values():
-                self._prune(dq, now)
-            for dq in self._ttl_baseline.values():
-                self._prune(dq, now)
+            for baseline in (self._seq_baseline, self._ack_baseline, self._ttl_baseline):
+                for ip, dq in baseline.items():
+                    key = (id(baseline), ip)
+                    stats = self._wstats.get(key)
+                    if stats is None:
+                        stats = [0, 0.0, 0.0]
+                        self._wstats[key] = stats
+                    self._prune(dq, stats, now)
+                    if not dq:
+                        del self._wstats[key]
             self._last_cleanup = time.time()

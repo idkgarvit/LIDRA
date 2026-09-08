@@ -1,9 +1,7 @@
 # src/utils/config_loader.py
 """Central config cache: loaded once, shared by all modules."""
 
-import os
 import logging
-from pathlib import Path
 from typing import Any, Optional
 from utils.paths import get_config_path, resolve_secret
 
@@ -37,6 +35,8 @@ def _post_process_secrets(cfg: dict):
         ("threat_intel.abuseipdb_api_key", "abuseipdb", "api_key"),
         ("threat_intel.virustotal_api_key", "virustotal", "api_key"),
         ("dashboard.api_key", "dashboard", "api_key"),
+        ("alerts.slack_webhook", "slack", "webhook"),
+        ("alerts.discord_webhook", "discord", "webhook"),
     ]
     for dot_key, cat, skey in mapping:
         parts = dot_key.split(".")

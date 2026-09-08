@@ -4,7 +4,7 @@
 # Pre-req: LIDRA TUI is running in another terminal.
 #
 # This script:
-#   1. Starts the vuln_server.py on port 8080 (in background)
+#   1. Starts the vuln_server.py on port 8081 (in background)
 #   2. Runs the SQLi demo
 #   3. Runs the port scan demo
 #   4. Skips the DNS tunnel demo (heavy install) — run it manually
@@ -32,11 +32,11 @@ bold "=========================================="
 echo
 
 # Start the vuln server
-yellow "[setup] Starting vuln_server.py on :8080..."
-python3 "$SCRIPT_DIR/vuln_server.py" 8080 >/tmp/lidra_vuln.log 2>&1 &
+yellow "[setup] Starting vuln_server.py on :8081..."
+python3 "$SCRIPT_DIR/vuln_server.py" 8081 >/tmp/lidra_vuln.log 2>&1 &
 VULN_PID=$!
 sleep 1
-if ! curl -s http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+if ! curl -s http://127.0.0.1:8081/healthz >/dev/null 2>&1; then
     red "[!] vuln_server did not start. Check /tmp/lidra_vuln.log"
     kill $VULN_PID 2>/dev/null
     exit 1

@@ -45,6 +45,7 @@ class FirewallManager:
         self.NFT_BRIDGE_FORWARD_CHAIN = nft_cfg.get("bridge_forward_chain", "lidra_forward")
         self.NFT_BRIDGE_INPUT_CHAIN = nft_cfg.get("bridge_input_chain", "lidra_input")
         self._nft_lock = threading.Lock()
+        self._bridge_blocked = set()
         self._use_nft = False
         if self.backend == "nftables" or (backend == "auto" and not self._has_iptables()):
             if self._has_nftables():
@@ -232,9 +233,10 @@ class FirewallManager:
         try:
             result = subprocess.run(
                 ["iptables", "-L", self.chain, "-n", "--line-numbers"],
-                capture_output=True, text=True, check=False
+                capture_output=True, text=True, check=False, timeout=10
             )
-            return ip in result.stdout
+            # ponytail: token match — substring would confuse 1.2.3.4 with 1.2.3.40
+            return re.search(rf"(?<![\d.]){re.escape(ip)}(?![\d.])", result.stdout) is not None
         except Exception:
             return False
 
@@ -243,7 +245,7 @@ class FirewallManager:
         try:
             result = self._run_nft(["--handle", "list", "chain", family, table, self.chain],
                                    check=True)
-            return ip in result.stdout
+            return re.search(rf"(?<![\d.]){re.escape(ip)}(?![\d.])", result.stdout) is not None
         except Exception:
             return False
 
@@ -334,20 +336,29 @@ class FirewallManager:
         self._run_nft(["delete", "table", "bridge", self.NFT_BRIDGE_TABLE], check=False)
         logger.info("[Firewall] Bridge nftables removed")
 
-    def bridge_block_ip(self, ip: str):
+    def bridge_block_ip(self, ip: str, own_ips=()):
         try:
             ip = _validate_ip(ip)
         except ValueError as e:
             logger.error(f"Refusing to bridge-block invalid IP: {e}")
             return
+        # ponytail: never block ourselves — multicast/IGMP noise scores the
+        # mgmt IP, and one self-block blacks out the whole bridge.
+        if ip in own_ips:
+            logger.warning(f"[Firewall] Refusing to bridge-block own IP {ip}")
+            return
         if self.dry_run:
             logger.info(f"[DRY-RUN] Would add bridge drop rule for {ip}")
             return
         with self._nft_lock:
+            if ip in self._bridge_blocked:
+                logger.debug(f"[Firewall] {ip} already bridge-blocked; skipping dup")
+                return
             self._run_nft([
                 "insert", "rule", "bridge", self.NFT_BRIDGE_TABLE, self.NFT_BRIDGE_FORWARD_CHAIN,
                 "ip", "saddr", ip, "drop"
             ], check=False)
+            self._bridge_blocked.add(ip)
         logger.info(f"[Firewall] Bridge block {ip}")
 
     def bridge_unblock_ip(self, ip: str):
@@ -369,6 +380,7 @@ class FirewallManager:
                     "delete", "rule", "bridge", self.NFT_BRIDGE_TABLE,
                     self.NFT_BRIDGE_FORWARD_CHAIN, f"handle {handle}"
                 ], check=False)
+            self._bridge_blocked.discard(ip)
         logger.info(f"[Firewall] Bridge unblock {ip}")
 
     # --- Local mode (same-machine) iptables methods ---
@@ -408,7 +420,7 @@ class FirewallManager:
             logger.info(f"[DRY-RUN] Would remove iptables INPUT NFQUEUE rule (queue {queue_num})")
             return
         self._flush_local_nfqueue(queue_num)
-        logger.info(f"[Firewall] INPUT NFQUEUE rules cleaned")
+        logger.info("[Firewall] INPUT NFQUEUE rules cleaned")
 
     def _flush_local_nfqueue(self, queue_num: int = 0):
         """Remove ALL NFQUEUE rules for this queue_num from INPUT (including orphaned manual ones)."""

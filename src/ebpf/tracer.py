@@ -6,7 +6,6 @@ Controls eBPF probe lifecycle and event collection
 import os
 import logging
 import threading
-import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Callable
@@ -81,7 +80,6 @@ class EBPFTracer:
     def _check_ebpf_availability(self):
         """Check if eBPF can be loaded."""
         try:
-            from bcc import BPF
             
             # Check kernel support
             if os.path.exists("/sys/kernel/debug/tracing/events"):
@@ -264,14 +262,24 @@ class EBPFTracer:
                 if not log_sources:
                     log_sources = ['/var/log/syslog']
         
+        # ponytail: on systemd distros /var/log/auth.log is stale (rsyslog
+        # often absent) while sshd logs to the journal as sshd-session.
+        # Without this, SSH brute-force is invisible. Auto-add journalctl.
+        import shutil
+        if shutil.which("journalctl") and "journalctl" not in log_sources:
+            log_sources = list(log_sources) + ["journalctl"]
+
         self.fallback_parser = LogParser(log_sources)
         self.fallback_detector = AttackDetector()
         self.fallback_threads = []
-        
+
         # One thread per log source (each generator blocks forever)
         for log_path in log_sources:
+            target = (self._fallback_monitor_journalctl
+                      if log_path == "journalctl"
+                      else self._fallback_monitor_file)
             t = threading.Thread(
-                target=self._fallback_monitor_file,
+                target=target,
                 args=(log_path,),
                 daemon=True
             )
@@ -293,23 +301,52 @@ class EBPFTracer:
             for event in self.fallback_parser.get_live_events(log_path):
                 if not self.running:
                     break
-                attacks = self.fallback_detector.analyze_event(event)
-                logger.debug(f"[Fallback] {log_path}: {event.log_type} from {event.ip_address} | attacks: {[a.attack_type for a in attacks]}")
-                for attack in attacks:
-                    sec_event = SecurityEvent(
-                        timestamp=attack.timestamp,
-                        event_type=attack.attack_type,
-                        pid=0,
-                        uid=0,
-                        username=attack.details.get('username', ''),
-                        filename=attack.details.get('path', ''),
-                        dst_ip=attack.ip_address,
-                        raw_data={'attack': asdict(attack)}
-                    )
-                    for callback in self.callbacks:
-                        callback(sec_event)
+                self._emit_fallback_attacks(log_path, event)
         except Exception as e:
             logger.error(f"Fallback monitor error for {log_path}: {e}")
+
+    def _emit_fallback_attacks(self, source, event):
+        attacks = self.fallback_detector.analyze_event(event)
+        logger.debug(f"[Fallback] {source}: {event.log_type} from {event.ip_address} | attacks: {[a.attack_type for a in attacks]}")
+        for attack in attacks:
+            sec_event = SecurityEvent(
+                timestamp=attack.timestamp,
+                event_type=attack.attack_type,
+                pid=0,
+                uid=0,
+                username=attack.details.get('username', ''),
+                filename=attack.details.get('path', ''),
+                dst_ip=attack.ip_address,
+                raw_data={'attack': asdict(attack)}
+            )
+            for callback in self.callbacks:
+                callback(sec_event)
+
+    def _fallback_monitor_journalctl(self, _source):
+        """Tail the systemd journal (live SSH/auth source on modern distros)."""
+        import subprocess
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ["journalctl", "-f", "-n", "0", "-o", "short-precise"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, errors="ignore",
+            )
+            while self.running and proc.stdout:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                event = self.fallback_parser.parse_line(line, "journalctl")
+                if event:
+                    self._emit_fallback_attacks("journalctl", event)
+        except Exception as e:
+            logger.error(f"Fallback monitor error for journalctl: {e}")
+        finally:
+            try:
+                if proc:
+                    proc.terminate()
+            except Exception:
+                pass
     
     def stop(self):
         """Stop event collection and unload eBPF."""
@@ -374,9 +411,13 @@ class EBPFDetector:
         
         elif event.event_type == "kill":
             return self._analyze_kill(event)
-        
+
         return None
-    
+
+    # ponytail: agent_base drives every detector via analyze_event — without
+    # this alias, real kernel eBPF events died in AttributeError here.
+    analyze_event = analyze
+
     def _analyze_exec(self, event: SecurityEvent) -> Optional[Dict]:
         """Analyze process execution for suspicious activity."""
         
@@ -491,16 +532,18 @@ class EBPFDetector:
         
         path_lower = event.filename.lower()
         
-        # Sensitive file access
+        # Sensitive file access — patterns from config `sensitive_paths`
+        # (attack class derived from path, same mapping as before).
         sensitive_patterns = {
-            '/etc/passwd': 'credential_access',
-            '/etc/shadow': 'credential_access',
-            '/.ssh/': 'credential_access',
-            '/.aws/': 'credential_access',
-            '/var/log/': 'log_tampering',
-            '/proc/self/': 'process_memory_access',
+            p: ('log_tampering' if p.startswith('/var/log/')
+                else 'process_memory_access' if p.startswith('/proc/')
+                else 'credential_access')
+            for p in _get_config_list("sensitive_paths", [
+                '/etc/passwd', '/etc/shadow', '/.ssh/', '/.aws/',
+                '/var/log/', '/proc/self/',
+            ])
         }
-        
+
         for pattern, attack_type in sensitive_patterns.items():
             if pattern in path_lower:
                 return {

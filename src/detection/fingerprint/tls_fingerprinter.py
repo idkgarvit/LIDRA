@@ -1,6 +1,7 @@
+import hashlib
 import logging
 import struct
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from threading import Lock
 from utils.config_loader import get_cfg
 
@@ -15,43 +16,48 @@ def _load_ja4_db():
     _KNOWN_MALICIOUS_JA4 = set(fingerprints)
 
 
-def _ja4_trunc(value: int) -> str:
-    if value > 0xFFFF:
-        return hex(value)[2:6]
-    if value > 0xFF:
-        return hex(value)[2:4]
-    return f"{value:02x}"
-
-
-def _cipher_group(ciphers: List[int]) -> str:
-    groups = []
-    for c in ciphers[:8]:
-        groups.append(f"{c:04x}")
-    return "_".join(groups) if groups else "00"
-
-
-def _ext_group(extensions: List[int]) -> str:
-    groups = []
-    for e in extensions:
-        groups.append(f"{e:04x}")
-    return "_".join(groups[:6]) if groups else "00"
-
-
 def _first_alpn(ext_data: bytes) -> str:
     if len(ext_data) < 2:
-        return "00"
+        return ""
     alpn_len = struct.unpack(">H", ext_data[:2])[0]
     offset = 2
-    alpns = []
     while offset + 1 < len(ext_data) and offset < 2 + alpn_len:
         proto_len = ext_data[offset]
         offset += 1
         if offset + proto_len <= len(ext_data):
-            alpns.append(ext_data[offset:offset + proto_len].decode("ascii", errors="replace"))
-            offset += proto_len
-        else:
-            break
-    return alpns[0][:8] if alpns else "00"
+            return ext_data[offset:offset + proto_len].decode("ascii", errors="replace")
+        break
+    return ""
+
+
+def _ja4_full(client_version: int, ciphers: List[int], extensions: List[int],
+              sni: Optional[str], alpn: str) -> str:
+    """Spec-compliant JA4 (FoxIO): t13d1516h2_<12hex>_<12hex>.
+
+    a-part = TLS ver + sni(d/i) + cipher/ext counts + alpn edge chars;
+    hashes = truncated sha256 over original-order hex lists, with SNI(0)
+    and ALPN(16) stripped from the extension hash input.
+    """
+    # ponytail: wire hellos offer 0x0303 + supported_versions(43) for TLS1.3 —
+    # ext presence is the version signal, not the legacy version field.
+    if client_version == 0x0304 or (client_version == 0x0303 and 43 in extensions):
+        ver = "t13"
+    elif client_version == 0x0303:
+        ver = "t12"
+    elif client_version == 0x0302:
+        ver = "t11"
+    elif client_version == 0x0301:
+        ver = "t10"
+    else:
+        ver = "t00"
+    sni_flag = "d" if sni else "i"
+    a = f"{ver}{sni_flag}{min(len(ciphers), 99):02d}{min(len(extensions), 99):02d}"
+    a += (alpn[0] + alpn[-1]) if alpn else "00"
+    cipher_hash = hashlib.sha256(",".join(f"{c:04x}" for c in ciphers).encode()).hexdigest()[:12]
+    ext_hash = hashlib.sha256(
+        ",".join(f"{e:04x}" for e in extensions if e not in (0x00, 0x10)).encode()
+    ).hexdigest()[:12]
+    return f"{a}_{cipher_hash}_{ext_hash}"
 
 
 def parse_tls_client_hello(data: bytes) -> Optional[Dict]:
@@ -73,7 +79,6 @@ def parse_tls_client_hello(data: bytes) -> Optional[Dict]:
     offset = 5 + 4
     client_version = struct.unpack(">H", data[offset:offset + 2])[0]
     offset += 2
-    random = data[offset:offset + 32]
     offset += 32
     if offset + 1 > len(data):
         return None
@@ -109,10 +114,8 @@ def parse_tls_client_hello(data: bytes) -> Optional[Dict]:
         ext_len_field = struct.unpack(">H", ext_data[i + 2:i + 4])[0]
         extensions.append(ext_type)
         if ext_type == 0x00 and ext_len_field > 5:
-            sni_list_len = struct.unpack(">H", ext_data[i + 4:i + 6])[0]
             sni_offset = i + 6
             if sni_offset + 1 <= len(ext_data):
-                sni_name_type = ext_data[sni_offset]
                 sni_offset += 1
                 if sni_offset + 2 <= len(ext_data):
                     sni_len = struct.unpack(">H", ext_data[sni_offset:sni_offset + 2])[0]
@@ -123,12 +126,7 @@ def parse_tls_client_hello(data: bytes) -> Optional[Dict]:
             alpn_data = ext_data[i + 4:i + 4 + ext_len_field]
         i += 4 + ext_len_field
     alpn = _first_alpn(alpn_data)
-    proto = "tcp"
-    ja4a = _cipher_group(ciphers)
-    ja4b = _ext_group(extensions)
-    ja4c = alpn
-    ja4d = _ja4_trunc(client_version)
-    ja4_hash = f"t{proto}a{ja4a}b{ja4b}c{ja4c}d{ja4d}"
+    ja4_hash = _ja4_full(client_version, ciphers, extensions, sni, alpn)
     return {
         "ja4": ja4_hash,
         "sni": sni,

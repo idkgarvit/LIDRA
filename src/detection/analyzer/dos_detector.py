@@ -1,8 +1,8 @@
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Deque, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +15,15 @@ class DoSDetector:
         self._bw_limit = cfg.get("bandwidth_limit_mbps", 100) * 1_000_000 // 8
         self._icmp_limit = cfg.get("icmp_rate_limit", 100)
         self._window = cfg.get("window_seconds", 10)
-        self._syn: Dict[str, List[float]] = defaultdict(list)
-        self._conn: Dict[str, List[float]] = defaultdict(list)
-        self._icmp: Dict[str, List[float]] = defaultdict(list)
-        self._bw: Dict[str, List[tuple]] = defaultdict(list)
+        # ponytail: time-ordered deques + left-prune = amortized O(1) per
+        # packet. The old full-list scan + slice-copy per packet went O(n^2)
+        # under flood (5000-entry windows re-scanned per SYN) and stalled
+        # NFQUEUE verdicts. _bw_total keeps bandwidth O(1) too.
+        self._syn: Dict[str, Deque[float]] = defaultdict(deque)
+        self._conn: Dict[str, Deque[float]] = defaultdict(deque)
+        self._icmp: Dict[str, Deque[float]] = defaultdict(deque)
+        self._bw: Dict[str, Deque[Tuple[float, int]]] = defaultdict(deque)
+        self._bw_total: Dict[str, int] = defaultdict(int)
         self._last_cleanup = time.time()
         self._lock = Lock()
 
@@ -51,12 +56,22 @@ class DoSDetector:
         if proto == "icmp":
             self._icmp[ip].append(now)
             rate = self._rate(self._icmp[ip], self._window)
-            if rate > self._icmp_limit:
+            # ponytail: 10s-average hides sub-second bursts (ping -f -c 200 =
+            # ~200pps for 1s reads as 20/s). Flag the burst itself too.
+            # Walk from the right (time-ordered) — O(burst), not O(window).
+            burst = 0
+            for t in reversed(self._icmp[ip]):
+                if t > now - 1:
+                    burst += 1
+                else:
+                    break
+            if rate > self._icmp_limit or burst >= 50:
                 detections.append({"attack_type": "icmp_flood", "severity": "high",
-                                   "source_ip": ip, "details": f"ICMP flood: {rate:.0f}/s"})
+                                   "source_ip": ip, "details": f"ICMP flood: {rate:.0f}/s (burst {burst}/s)"})
 
         self._bw[ip].append((now, plen))
-        bps = self._bandwidth(self._bw[ip], self._window)
+        self._bw_total[ip] += plen
+        bps = self._bandwidth(ip, self._bw[ip], self._bw_total, self._window)
         if bps > self._bw_limit:
             detections.append({"attack_type": "bandwidth_attack", "severity": "high",
                                "source_ip": ip, "details": f"BW: {bps//1000}KB/s"})
@@ -64,19 +79,20 @@ class DoSDetector:
         return detections if detections else None
 
     @staticmethod
-    def _rate(timestamps: List[float], window: float) -> float:
+    def _rate(entries: Deque[float], window: float) -> float:
         cutoff = time.time() - window
-        recent = [t for t in timestamps if t > cutoff]
-        timestamps[:] = recent
-        return len(recent) / window if window else 0
+        while entries and entries[0] <= cutoff:
+            entries.popleft()
+        return len(entries) / window if window else 0
 
     @staticmethod
-    def _bandwidth(entries: List[tuple], window: float) -> int:
+    def _bandwidth(ip: str, entries: Deque[Tuple[float, int]],
+                   totals: Dict[str, int], window: float) -> int:
         cutoff = time.time() - window
-        recent = [(t, b) for t, b in entries if t > cutoff]
-        entries[:] = recent
-        total = sum(b for _, b in recent)
-        return int(total / window) if window else 0
+        while entries and entries[0][0] <= cutoff:
+            _, b = entries.popleft()
+            totals[ip] -= b
+        return int(totals[ip] / window) if window else 0
 
     def _maybe_cleanup(self):
         if time.time() - self._last_cleanup > 60:
@@ -84,4 +100,5 @@ class DoSDetector:
             self._conn.clear()
             self._icmp.clear()
             self._bw.clear()
+            self._bw_total.clear()
             self._last_cleanup = time.time()

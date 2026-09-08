@@ -1,0 +1,10 @@
+#!/bin/sh
+# systemd-sleep hook: restart LIDRA after suspend/hibernate.
+# Lid-close freezes the process; on resume NICs flap and capture sockets go
+# stale. A restart re-binds cleanly. Installed to
+# /usr/lib/systemd/system-sleep/lidra by post_install.sh.
+case "$1/$2" in
+    post/*)
+        systemctl try-restart lidra.service >/dev/null 2>&1 || true
+        ;;
+esac

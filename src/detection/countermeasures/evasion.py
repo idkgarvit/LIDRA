@@ -2,9 +2,8 @@ import logging
 import struct
 import time
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 import unicodedata
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +73,8 @@ def check_ip_frag_overlap(ip_id: int, frag_offset: int, more_frags: bool, proto:
         _OVERLAP_LOG[key] = time.time()
         if len(_OVERLAP_LOG) > _MAX_OVERLAP_ENTRIES:
             cutoff = time.time() - 300
-            _OVERLAP_LOG.clear()
+            for k in [k for k, v in _OVERLAP_LOG.items() if v < cutoff]:
+                del _OVERLAP_LOG[k]
     return None
 
 
@@ -121,7 +121,6 @@ def check_tcp_paws(tcp_options: bytes, src_ip: str) -> Optional[Dict]:
         if kind == 8:
             if i + 10 <= len(tcp_options):
                 ts_val = struct.unpack(">I", tcp_options[i + 2:i + 6])[0]
-                ts_ecr = struct.unpack(">I", tcp_options[i + 6:i + 10])[0]
                 with _TS_LOCK:
                     prev = _TCP_TS_LOG.get(src_ip, 0)
                     if prev and ts_val < prev and (prev - ts_val) < _PAWS_MAX_DIST:

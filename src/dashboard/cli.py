@@ -1,9 +1,10 @@
 # src/dashboard/cli.py
 """LIDRA v3 CLI Dashboard - Rich terminal interface."""
 
+import logging
 import time
 import threading
-from datetime import datetime
+from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 from rich.live import Live
@@ -15,6 +16,7 @@ import psutil
 
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 class CLIDashboard:
@@ -355,7 +357,7 @@ class CLIDashboard:
         data = self._get_stats()
         stats = data.get("stats", {})
 
-        console.print(f"\n[cyan]Status:[/cyan] Running")
+        console.print("\n[cyan]Status:[/cyan] Running")
         console.print(f"[cyan]Total Attackers:[/cyan] {stats.get('total_attackers', 0)}")
         console.print(f"[cyan]Attacks (24h):[/cyan] {stats.get('attacks_24h', 0)}")
         console.print(f"[cyan]Active Blocks:[/cyan] {len(data.get('active_blocks', []))}")

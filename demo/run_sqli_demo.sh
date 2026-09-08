@@ -15,11 +15,11 @@
 #
 # Usage:
 #   ./demo/run_sqli_demo.sh [TARGET_URL]
-#   defaults to http://127.0.0.1:8080
+#   defaults to http://127.0.0.1:8081
 
 set -e
 
-TARGET="${1:-http://127.0.0.1:8080}"
+TARGET="${1:-http://127.0.0.1:8081}"
 SLEEP_BETWEEN=1.5
 
 red()    { printf "\033[31m%s\033[0m\n" "$*"; }

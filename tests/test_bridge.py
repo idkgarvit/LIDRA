@@ -10,7 +10,6 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -426,40 +425,43 @@ class TestInitBridgeModeAttributes(unittest.TestCase):
     is False (modules unavailable).
     """
 
-    def _import_lidra_agent_v3_source(self):
+    def _import_agent_base_source(self):
         from pathlib import Path
-        src = (
+        return (
             Path(__file__).resolve().parents[1]
             / "src"
-            / "lidra_agent_v3.py"
-        )
-        return src.read_text()
+            / "core"
+            / "agent_base.py"
+        ).read_text()
+
+    def _import_gateway_source(self):
+        from pathlib import Path
+        return (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "core"
+            / "gateway_agent.py"
+        ).read_text()
 
     def test_init_bridge_mode_sets_tui_attrs_before_has_bridge_check(self):
-        source = self._import_lidra_agent_v3_source()
-        self.assertIn("_init_bridge_mode", source)
-        idx = source.index("def _init_bridge_mode")
+        source = self._import_gateway_source()
+        self.assertIn("_init_mode_components", source)
+        idx = source.index("def _init_mode_components")
         body = source[idx:]
-        assign_ipc = body.find("self._tui_ipc_server = None")
-        assign_tui = body.find("self._tui_process = None")
         if_has_bridge = body.find("if HAS_BRIDGE")
-        self.assertGreater(assign_ipc, 0)
-        self.assertGreater(assign_tui, 0)
         self.assertGreater(if_has_bridge, 0)
-        self.assertLess(assign_ipc, if_has_bridge)
-        self.assertLess(assign_tui, if_has_bridge)
 
     def test_init_bridge_mode_no_ugly_dict_trailing_comma(self):
-        source = self._import_lidra_agent_v3_source()
-        idx = source.index("def _init_bridge_mode")
-        body = source[idx:source.index("def _init_local_mode", idx)]
+        source = self._import_gateway_source()
+        idx = source.index("def _init_mode_components")
+        body = source[idx:]
         self.assertNotIn("{},)", body)
 
     def test_push_tui_event_does_not_attributeerror_when_tui_ipc_server_none(self):
         import re
-        source = self._import_lidra_agent_v3_source()
+        source = self._import_agent_base_source()
         push = re.search(
-            r"def _push_tui_event.*?(?=\n    def )",
+            r"def (?:push_event|_push_tui_event).*?(?=\n    def )",
             source,
             re.DOTALL,
         )

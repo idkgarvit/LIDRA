@@ -1,7 +1,7 @@
 import logging
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Set
+from typing import Dict, Optional, Set
 from utils.config_loader import get_cfg
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,6 @@ class PacketAnalyzer:
         self._cleanup_if_needed()
 
         src_ip = packet.get("src_ip", "")
-        dst_ip = packet.get("dst_ip", "")
         dst_port = packet.get("dst_port", 0)
         flags = packet.get("flags", "")
         protocol = packet.get("protocol", "tcp")
@@ -66,7 +65,13 @@ class PacketAnalyzer:
 
     def _check_syn_flood(self, ip: str) -> Optional[Dict]:
         now = time.time()
-        elapsed = now - self._syn_window.get(ip, now)
+        # ponytail: init window on first sight — defaulting to `now` meant
+        # elapsed was always ~0, the reset never ran, and the counter +
+        # cleanup tracked lifetime SYNs instead of a 10s sliding window
+        if ip not in self._syn_window:
+            self._syn_window[ip] = now
+            self._syn_tracker[ip] = 0
+        elapsed = now - self._syn_window[ip]
         if elapsed > 10:
             self._syn_tracker[ip] = 0
             self._syn_window[ip] = now
@@ -83,7 +88,10 @@ class PacketAnalyzer:
 
     def _check_port_scan(self, ip: str, port: int) -> Optional[Dict]:
         now = time.time()
-        elapsed = now - self._port_scan_time.get(ip, now)
+        if ip not in self._port_scan_time:
+            self._port_scan_time[ip] = now
+            self._port_scan_tracker[ip] = set()
+        elapsed = now - self._port_scan_time[ip]
         if elapsed > 10:
             self._port_scan_tracker[ip] = set()
             self._port_scan_time[ip] = now
@@ -100,9 +108,14 @@ class PacketAnalyzer:
 
     def _check_invalid_flags(self, flags: str) -> Optional[Dict]:
         if not flags:
-            return None
-        if flags == "FIN" or (len(flags) == 0):
-            return None
+            # TCP with zero flags = NULL scan (stealth probe). Medium only:
+            # LOG_ONLY, never auto-DROP.
+            return {
+                "attack_type": "null_scan",
+                "severity": "medium",
+                "source_ip": "",
+                "details": "NULL scan: TCP packet with no flags",
+            }
         if set(flags).issubset({"F", "S", "R", "P", "A", "U", "E", "C", "N"}):
             pass
         flag_set = set(flags.upper().replace(" ", ""))
@@ -125,13 +138,25 @@ class PacketAnalyzer:
 
     def _check_fragmentation(self, packet: Dict) -> Optional[Dict]:
         frag_offset = packet.get("frag_offset", 0)
-        if frag_offset > 0:
-            return None
+        mf_flag = packet.get("mf_flag", False)  # More Fragments flag
+
+        # Any fragment seen (offset>0 or MF set). Medium only — plain
+        # fragmentation is common (large DNS/UDP, VPNs); overlap/tiny-fragment
+        # evasion is left to FragmentAnalyzer. High here auto-DROPs legit traffic.
+        if frag_offset > 0 or mf_flag:
+            return {
+                "attack_type": "fragmentation_attack",
+                "severity": "medium",
+                "source_ip": packet.get("src_ip", ""),
+                "details": f"IP fragmentation detected: offset={frag_offset}, mf_flag={mf_flag}",
+            }
         return None
 
     def _check_protocol_anomaly(self, packet: Dict) -> Optional[Dict]:
         protocol = packet.get("protocol", "")
-        if protocol not in ("tcp", "udp", "icmp"):
+        # ponytail: 'ipv6' is a normal L3 here (IPv6Analyzer covers tunneled
+        # abuse) — flagging it alerted on every IPv6 packet
+        if protocol not in ("tcp", "udp", "icmp", "ipv6"):
             return {
                 "attack_type": "protocol_anomaly",
                 "severity": "low",
@@ -146,7 +171,7 @@ class PacketAnalyzer:
                 "attack_type": "blocked_ip_traffic",
                 "severity": "high",
                 "source_ip": ip,
-                "details": f"Blocklisted IP attempted traffic",
+                "details": "Blocklisted IP attempted traffic",
             }
         return None
 
@@ -154,11 +179,11 @@ class PacketAnalyzer:
         now = time.time()
         if now - self._last_cleanup > self._cleanup_interval:
             cutoff = now - 10
-            stale_syn = [ip for ip, t in self._syn_window.items() if t < cutoff]
+            stale_syn = [ip for ip, t in self._syn_window.items() if t <= cutoff]
             for ip in stale_syn:
                 del self._syn_tracker[ip]
                 del self._syn_window[ip]
-            stale_port = [ip for ip, t in self._port_scan_time.items() if t < cutoff]
+            stale_port = [ip for ip, t in self._port_scan_time.items() if t <= cutoff]
             for ip in stale_port:
                 del self._port_scan_tracker[ip]
                 del self._port_scan_time[ip]

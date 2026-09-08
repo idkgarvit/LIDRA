@@ -1,10 +1,8 @@
 import logging
-import math
 import os
 import threading
-import time
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -125,8 +123,6 @@ class AnomalyDetector:
     Z_SCORE_THRESHOLD_LOW = 2.0
 
     MIN_SAMPLES_FOR_BASELINE = 10
-    BASELINE_WINDOW_HOURS = 24
-    BASELINE_DECAY_DAYS = 7
 
     def __init__(self):
         self.baselines: Dict[str, Baseline] = {}
@@ -185,22 +181,6 @@ class AnomalyDetector:
             return True, 'medium', z_score
         return False, 'low', z_score
 
-    def _ensemble_decision(self, zscore_anomaly: bool, zscore_severity: str,
-                           ml_result: Optional[Dict],
-                           recon_error: Optional[float]) -> Tuple[bool, str]:
-        if ml_result and ml_result.get("anomaly", False):
-            return True, "critical"
-        if zscore_anomaly:
-            return True, zscore_severity
-        if recon_error and recon_error > 0.01:
-            return True, "low"
-        return False, "low"
-
-    def detect_on_features(self, features: List[float]) -> Optional[AnomalyResult]:
-        ml_result = _run_onnx_inference(features)
-        recon_error = _run_autoencoder_inference(features)
-        return ml_result, recon_error
-
     def detect(self, entity: str, metric: str, value: float) -> Optional[AnomalyResult]:
         key = f"{entity}:{metric}"
 
@@ -216,6 +196,7 @@ class AnomalyDetector:
         if not is_anomaly:
             return None
 
+        self.detection_count += 1
         self.anomaly_count += 1
 
         direction = "higher" if value > baseline.mean else "lower"
@@ -254,55 +235,3 @@ class AnomalyDetector:
             'anomalies': self.anomaly_count,
             'ml_available': _ONNX_AVAILABLE and _ONNX_SESSION is not None,
         }
-
-
-class SecurityAnomalyDetector:
-    def __init__(self):
-        self.detector = AnomalyDetector()
-        self._setup_scheduled_baseline_learning()
-
-    def _setup_scheduled_baseline_learning(self):
-        pass
-
-    def check_login_frequency(self, user: str, count: int):
-        return self.detector.detect(user, 'login_count', float(count))
-
-    def check_connection_rate(self, host: str, rate: float):
-        return self.detector.detect(host, 'connection_rate', rate)
-
-    def check_process_count(self, host: str, count: int):
-        return self.detector.detect(host, 'process_count', float(count))
-
-    def check_data_transfer(self, user: str, bytes_sent: int):
-        return self.detector.detect(user, 'data_transfer', float(bytes_sent))
-
-    def check_command_frequency(self, user: str, count: int):
-        return self.detector.detect(user, 'command_count', float(count))
-
-    def check_time_anomaly(self, user: str, hour: int):
-        hour_sin = math.sin(2 * math.pi * hour / 24)
-        return self.detector.detect(user, 'hour_of_day', hour_sin)
-
-    def learn_from_history(self, historical_data: List[Dict]):
-        grouped = defaultdict(list)
-
-        for entry in historical_data:
-            entity = entry.get('entity', '')
-            metric = entry.get('metric', '')
-            value = entry.get('value', 0)
-
-            if entity and metric:
-                grouped[f"{entity}:{metric}"].append(value)
-
-        for key, values in grouped.items():
-            entity, metric = key.split(':', 1)
-            self.detector.learn_baseline(entity, metric, values)
-
-        logger.info(f"Learned {len(grouped)} baselines from history")
-
-    def get_metrics(self) -> Dict:
-        return self.detector.get_metrics()
-
-
-def create_anomaly_detector() -> SecurityAnomalyDetector:
-    return SecurityAnomalyDetector()

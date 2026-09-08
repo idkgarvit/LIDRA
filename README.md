@@ -31,18 +31,21 @@ LIDRA is a production-ready honeypot-based intrusion detection system designed f
 ## Quick Start
 
 ```bash
-# Clone repository
-git clone https://github.com/idkgarvit/LIDRA.git
-cd LIDRA
-
-# Install dependencies
-pip install -r requirements.txt
+# One command — asks: laptop shield or company gateway? (non-interactive: --laptop | --gateway)
+curl -fsSL https://github.com/idkgarvit/LIDRA/raw/main/install.sh | sudo bash
 
 # Configure (edit with your API keys/webhooks)
-nano config/config.yaml
+sudo nano /opt/lidra/config/config.yaml
 
-# Run LIDRA
-python src/lidra_agent_v3.py
+# Watch it live (no sudo needed)
+cd /opt/lidra/src && LIDRA_TUI_SOCKET=$(ls -t /tmp/lidra_tui_*.sock | head -1) \
+  PYTHONPATH=. python3 -m tui.app --standalone
+```
+
+Manual run instead of the service:
+
+```bash
+sudo -E python3 src/lidra_agent_v3.py --tui
 ```
 
 Dashboard: TUI mode (run with `--tui`).
@@ -59,6 +62,7 @@ Set these via environment variables or `config/config.yaml`:
 | `SLACK_WEBHOOK` | `alerts.slack_webhook` | No | Slack alert notifications (in YAML config) |
 | `DISCORD_WEBHOOK` | `alerts.discord_webhook` | No | Discord alert notifications (in YAML config) |
 | `LIDRA_METRICS_PORT` | — | No | Prometheus metrics port (default: 8080) |
+| `LIDRA_METRICS_HOST` | — | No | Metrics bind address (default: `0.0.0.0`; use `127.0.0.1` for localhost-only) |
 | `LIDRA_METRICS_CERT` | — | No | TLS cert path for metrics endpoint |
 | `LIDRA_METRICS_KEY` | — | No | TLS key path for metrics endpoint |
 | `LIDRA_DRY_RUN` | `response.dry_run` | No | Dry-run mode (`1` = no actual blocking) |
@@ -68,9 +72,9 @@ Set these via environment variables or `config/config.yaml`:
 > - Never commit API keys or webhooks to version control. Use environment variables or `.env` in production.
 > - The metrics endpoint (`:8080`) listens on all interfaces. In production, either:
 >   - Set `LIDRA_METRICS_CERT` + `LIDRA_METRICS_KEY` for TLS, **or**
->   - Bind to localhost only (add `--bind 127.0.0.1`), **or**
+>   - Bind to localhost only (`LIDRA_METRICS_HOST=127.0.0.1`), **or**
 >   - Use a reverse proxy (nginx) in front of the agent.
-> - Agent ↔ TUI IPC uses a Unix socket (`/tmp/lidra_tui.sock`) — local-only, no TLS needed.
+> - Agent ↔ TUI IPC uses a Unix socket (`/tmp/lidra_tui_<pid>.sock`) — local-only, no TLS needed.
 > - Docker Compose inter-container traffic is on an isolated bridge network.
 
 ## Demo (60 seconds)
@@ -80,7 +84,7 @@ DNS tunnel). See **[DEMO.md](DEMO.md)** for the walkthrough.
 
 ```bash
 # Terminal 1: start the TUI
-sudo -E python3 -m src.lidra_agent_v3 --tui
+sudo -E python3 src/lidra_agent_v3.py --tui
 
 # Terminal 2: run the demo (starts vuln_server, fires 3 attacks)
 ./demo/run_all.sh
@@ -111,7 +115,7 @@ sudo -E python3 -m src.lidra_agent_v3 --tui
 ### Key Settings (config/config.yaml)
 
 ```yaml
-mode: production  # development (60s) or production (300s)
+mode: local  # 'local' (this machine) | 'inline' (gateway bridge) | 'monitor' (legacy)
 
 database:
   path: ./data/lidra.db
@@ -141,15 +145,16 @@ response:
   block_ttl_seconds: 3600
 ```
 
-## API Endpoints
+## Monitoring
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/stats` | Attacker statistics |
-| `GET /api/attackers` | List of attackers |
-| `GET /api/recent-attacks` | Recent attack events |
-| `GET /api/honeypot-sessions` | Honeypot session data |
-| `POST /api/block` | Manually block an IP |
+LIDRA has no REST API — live state lives in the TUI (run with `--tui`)
+and machine-readable metrics on the Prometheus endpoint:
+
+| Surface | Address | Description |
+|---------|---------|-------------|
+| `GET /metrics` | `:8080` (or `LIDRA_METRICS_PORT`) | Prometheus counters/gauges (packets, attacks, blocks) |
+| TUI dashboard | `--tui` | Attackers, recent attacks, honeypot sessions, manual block/unblock |
+| `lidra-cli` | `python -m cli.main` (from `src/`) | Interactive shell (`block`, `unblock`, `status`) |
 
 ## Project Structure
 
@@ -211,14 +216,15 @@ docker-compose up -d
 # View logs
 docker logs -f lidra-core
 
-# Access dashboard
-open http://localhost:8080
+# Metrics endpoint (the visual dashboard is the TUI: sudo python src/lidra_agent_v3.py --tui)
+open http://localhost:8080/metrics
 ```
 
 ## Testing
 
 ```bash
-# Run test suite
+# Run test suite (test deps are separate from the production install)
+pip install -r requirements-test.txt
 pytest tests/ -v
 
 # Simulate SSH attack (test detection)
@@ -226,15 +232,15 @@ for i in {1..6}; do
   echo "Failed password from 192.168.1.100" >> /var/log/auth.log
 done
 
-# Check dashboard for new attacker
-curl http://localhost:8080/api/stats
+# Check metrics for the new attacker
+curl -s http://localhost:8080/metrics | grep lidra_attacks_total
 ```
 
 ## Deployment
 
 ### Docker (single service)
 ```bash
-docker build -t lidra:latest .
+docker build --target production -t lidra:latest .
 docker run --rm --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SYS_ADMIN \
   -p 8080:8080 lidra:latest
 ```
@@ -246,6 +252,18 @@ docker compose up -d
 # Prometheus:     http://localhost:9090
 # Grafana:        http://localhost:3000 (admin/admin)
 # Vuln server:    http://localhost:8081
+```
+
+### Recommended: agent on host, monitoring in Docker
+The agent sees real traffic, host logs, and the host firewall only when it
+runs bare-metal — a container on the compose bridge network sees (and can
+block) almost nothing. So run the sensor on the host and keep Prometheus +
+Grafana as a sidecar that scrapes it (graphs lag ~15s; alerts and blocks
+still fire instantly inside the agent):
+```bash
+sudo systemctl enable --now lidra   # or: sudo -E python3 src/lidra_agent_v3.py --tui
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d prometheus grafana
+# Grafana: http://localhost:3000 (admin/admin), scraping the host agent
 ```
 
 ### Hot-Reload
@@ -272,8 +290,9 @@ sudo python src/lidra_agent_v3.py
 
 ### Dashboard not starting
 ```bash
-pip install fastapi uvicorn
-python -m src.dashboard.main
+sudo -E python3 src/lidra_agent_v3.py --tui
+# or read-only, without starting the agent:
+./lidra dashboard
 ```
 
 ## License

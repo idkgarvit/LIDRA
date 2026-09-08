@@ -1,6 +1,5 @@
 """Tests for FP allowlist."""
 
-import pytest
 import sys
 from pathlib import Path
 
@@ -139,9 +138,13 @@ def test_should_suppress_timing_evasion_cloudflare():
     assert suppress is True
 
 
-def test_should_suppress_port_scan_private():
-    suppress, reason = should_suppress("192.168.1.5", "port_scan")
-    assert suppress is True
+def test_should_not_suppress_port_scan_private():
+    # LAN recon is the signal, not noise (live-test finding: suppressing this
+    # blinded all insider port scans). Only broadcast_storm is still skipped.
+    suppress, _ = should_suppress("192.168.1.5", "port_scan")
+    assert suppress is False
+    suppress, reason = should_suppress("192.168.1.5", "broadcast_storm")
+    assert suppress is True and reason == "private"
 
 
 def test_should_not_suppress_ssh_bruteforce_from_anywhere():

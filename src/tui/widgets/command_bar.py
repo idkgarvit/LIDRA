@@ -17,7 +17,7 @@ import asyncio
 import logging
 import socket
 from collections import deque
-from typing import Callable, Deque, List, Optional
+from typing import Deque, Optional
 
 from textual.app import ComposeResult
 from textual.widgets import Input, Static
@@ -91,7 +91,7 @@ class CommandBar(Vertical):
         self._toast_task: Optional[asyncio.Task] = None
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="toast-slot")
+        yield Toast("", id="toast-slot")
         yield Input(
             placeholder="Type command (block 1.2.3.4, whois 1.2.3.4, tail 50, filter, help, quit)",
             id="cmd-input",
@@ -102,7 +102,13 @@ class CommandBar(Vertical):
             self._toast = self.query_one("#toast-slot", Toast)
         except Exception:
             self._toast = None
-        self.query_one("#cmd-input", Input).focus()
+
+    def _focus_input(self) -> None:
+        """Programmatically focus the command input (called from dashboard search)."""
+        try:
+            self.query_one("#cmd-input", Input).focus()
+        except Exception:
+            pass
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         cmd = event.value.strip()
@@ -201,23 +207,49 @@ class CommandBar(Vertical):
         except ValueError:
             self._show_toast("Usage: tail <N>", "error")
             return
-        self._show_toast(f"Showing last {n} attacks (see event log)", "info")
+        # Update the event log max_lines
+        try:
+            from ..widgets.event_log import EventLog as EL
+            for el in self.app.query(EL):
+                el.set_max_lines(n)
+            self._show_toast(f"Showing last {n} events", "success")
+        except Exception:
+            self._show_toast(f"Showing last {n} attacks (see event log)", "info")
 
     def _do_filter(self, arg: str) -> None:
         if not arg.strip():
-            self._show_toast("Cleared filter", "info")
+            # Clear filter
+            try:
+                from ..widgets.event_log import EventLog as EL
+                for el in self.app.query(EL):
+                    el.set_filter("")
+                self._show_toast("Filter cleared", "success")
+            except Exception:
+                self._show_toast("Filter cleared", "info")
         else:
-            self._show_toast(f"Filter: {arg.strip()}", "info")
+            try:
+                from ..widgets.event_log import EventLog as EL
+                for el in self.app.query(EL):
+                    el.set_filter(arg.strip())
+                self._show_toast(f"Filtering: {arg.strip()}", "success")
+            except Exception:
+                self._show_toast(f"Filter: {arg.strip()}", "info")
 
     def _do_clear(self, _arg: str) -> None:
-        self._show_toast("Event log cleared", "info")
+        try:
+            from ..widgets.event_log import EventLog as EL
+            for el in self.app.query(EL):
+                el.clear_log()
+            self._show_toast("Event log cleared", "success")
+        except Exception:
+            self._show_toast("Event log cleared", "info")
 
     def _do_help(self, _arg: str) -> None:
         try:
             self.app.push_screen("help")
         except Exception:
             try:
-                from .screens.help_screen import HelpScreen
+                from ..screens.help_screen import HelpScreen
                 self.app.push_screen(HelpScreen())
             except Exception:
                 self._show_toast("Help screen not available", "error")

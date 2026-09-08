@@ -16,10 +16,11 @@ import threading
 import logging
 import time
 from datetime import datetime
-from typing import Optional, Callable, Dict, List
+from typing import Optional, Callable, Dict
 from dataclasses import dataclass
 from collections import defaultdict
 from utils.config_loader import get_cfg
+from utils.interface import local_ips
 
 logger = logging.getLogger("lidra.network.sniffer")
 
@@ -87,6 +88,9 @@ class PacketSniffer:
         self.thread = None
         self.socket = None
         self._lock = threading.Lock()
+        # ponytail: never skip RFC1918 — LAN attackers (this test's whole
+        # point) were invisible. Only ignore our own egress + loopback.
+        self._own_ips = local_ips()
 
         # Statistics
         self.stats = {
@@ -185,7 +189,10 @@ class PacketSniffer:
             if version != 4:
                 return None  # Only IPv4 for now
 
-            ip_header = data[ihl:ihl+20]
+            # ponytail: data starts AT the IP header on AF_INET raw sockets
+            # (no Ethernet header) — data[ihl:] was reading TCP bytes as IPs,
+            # so every address/protocol parsed was garbage and nothing fired.
+            ip_header = data[:20]
             src_ip = socket.inet_ntoa(ip_header[12:16])
             dst_ip = socket.inet_ntoa(ip_header[16:20])
             protocol = ip_header[9]
@@ -194,19 +201,19 @@ class PacketSniffer:
             dst_port = 0
             flags = None
 
-            if protocol == IP_PROTO_TCP and len(data) > ihl + 20:
+            if protocol == IP_PROTO_TCP and len(data) >= ihl + 20:  # was >: bare 40B SYN never parsed
                 tcp_header = data[ihl:ihl+20]
                 src_port = struct.unpack("!H", tcp_header[0:2])[0]
                 dst_port = struct.unpack("!H", tcp_header[2:4])[0]
                 flags = ""
                 if tcp_header[13] & 0x02: flags += "SYN"
-                if tcp_header[13] & 0x12: flags += "ACK"
+                if tcp_header[13] & 0x10: flags += "ACK"  # was 0x12 (SYN+ACK bits): pure SYN mislabeled "SYNACK", blinding SYN checks
                 if tcp_header[13] & 0x01: flags += "FIN"
                 if tcp_header[13] & 0x04: flags += "RST"
                 with self._lock:
                     self.stats["tcp_packets"] += 1
 
-            elif protocol == IP_PROTO_UDP and len(data) > ihl + 8:
+            elif protocol == IP_PROTO_UDP and len(data) >= ihl + 8:  # same >= fix
                 udp_header = data[ihl:ihl+8]
                 src_port = struct.unpack("!H", udp_header[0:2])[0]
                 dst_port = struct.unpack("!H", udp_header[2:4])[0]
@@ -242,8 +249,11 @@ class PacketSniffer:
         """Analyze packet for attack patterns."""
         attacks = []
 
-        # Skip private IPs
-        if packet.src_ip.startswith(("10.", "172.", "192.168.", "127.")):
+        # Skip only our own egress traffic and loopback — RFC1918 sources
+        # are real attackers on LAN deployments, not noise.
+        # ponytail: loopback analyzed, not skipped — localhost-source attacks
+        # are real signal (see inline_engine pipeline_inner).
+        if packet.src_ip in self._own_ips:
             return None
 
         # SYN Flood Detection

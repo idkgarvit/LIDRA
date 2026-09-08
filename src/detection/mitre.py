@@ -126,73 +126,76 @@ class MITREMapper:
         'crypto_miner': ['T1496'],
     }
     
-    # Technique to tactic mapping
-    TECHNIQUE_TO_TACTIC = {
+    # Technique to tactic mapping. T1053/T1078 legitimately span tactics
+    # (MITRE lists both under several); dict() keeps the LAST entry per
+    # technique, i.e. 'persistence' — the single-tactic model is a known
+    # simplification, get_tactic() returns one tactic per technique.
+    TECHNIQUE_TO_TACTIC = dict([
         # Initial Access
-        'T1190': 'initial_access',
-        'T1078': 'initial_access',
-        'T1133': 'initial_access',
-        'T1566': 'initial_access',
-        
+        ('T1190', 'initial_access'),
+        ('T1078', 'initial_access'),
+        ('T1133', 'initial_access'),
+        ('T1566', 'initial_access'),
+
         # Execution
-        'T1059': 'execution',
-        'T1204': 'execution',
-        'T1203': 'execution',
-        'T1053': 'execution',
-        
+        ('T1059', 'execution'),
+        ('T1204', 'execution'),
+        ('T1203', 'execution'),
+        ('T1053', 'execution'),
+
         # Persistence
-        'T1547': 'persistence',
-        'T1136': 'persistence',
-        'T1543': 'persistence',
-        'T1053': 'persistence',
-        'T1078': 'persistence',
-        
+        ('T1547', 'persistence'),
+        ('T1136', 'persistence'),
+        ('T1543', 'persistence'),
+        ('T1053', 'persistence'),
+        ('T1078', 'persistence'),
+
         # Privilege Escalation
-        'T1548': 'privilege_escalation',
-        'T1068': 'privilege_escalation',
-        
+        ('T1548', 'privilege_escalation'),
+        ('T1068', 'privilege_escalation'),
+
         # Defense Evasion
-        'T1562': 'defense_evasion',
-        'T1070': 'defense_evasion',
-        'T1036': 'defense_evasion',
-        'T1014': 'defense_evasion',
-        
+        ('T1562', 'defense_evasion'),
+        ('T1070', 'defense_evasion'),
+        ('T1036', 'defense_evasion'),
+        ('T1014', 'defense_evasion'),
+
         # Credential Access
-        'T1110': 'credential_access',
-        'T1003': 'credential_access',
-        'T1555': 'credential_access',
-        'T1056': 'credential_access',
-        
+        ('T1110', 'credential_access'),
+        ('T1003', 'credential_access'),
+        ('T1555', 'credential_access'),
+        ('T1056', 'credential_access'),
+
         # Discovery
-        'T1595': 'discovery',
-        'T1082': 'discovery',
-        'T1087': 'discovery',
-        'T1083': 'discovery',
-        'T1057': 'discovery',
-        
+        ('T1595', 'discovery'),
+        ('T1082', 'discovery'),
+        ('T1087', 'discovery'),
+        ('T1083', 'discovery'),
+        ('T1057', 'discovery'),
+
         # Lateral Movement
-        'T1021': 'lateral_movement',
-        'T1210': 'lateral_movement',
-        
+        ('T1021', 'lateral_movement'),
+        ('T1210', 'lateral_movement'),
+
         # Collection
-        'T1560': 'collection',
-        'T1119': 'collection',
-        'T1113': 'collection',
-        
+        ('T1560', 'collection'),
+        ('T1119', 'collection'),
+        ('T1113', 'collection'),
+
         # Exfiltration
-        'T1041': 'exfiltration',
-        'T1048': 'exfiltration',
-        
+        ('T1041', 'exfiltration'),
+        ('T1048', 'exfiltration'),
+
         # Impact
-        'T1486': 'impact',
-        'T1489': 'impact',
-        'T1485': 'impact',
-        'T1496': 'impact',
-        
+        ('T1486', 'impact'),
+        ('T1489', 'impact'),
+        ('T1485', 'impact'),
+        ('T1496', 'impact'),
+
         # Command & Control
-        'T1071': 'command_and_control',
-        'T1573': 'command_and_control',
-    }
+        ('T1071', 'command_and_control'),
+        ('T1573', 'command_and_control'),
+    ])
     
     # Tactic definitions
     TACTICS = {

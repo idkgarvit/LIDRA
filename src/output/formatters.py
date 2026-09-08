@@ -11,8 +11,7 @@ Supports multiple output formats:
 import json
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional
-from dataclasses import asdict
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +209,6 @@ class STIXFormatter(OutputFormatter):
             "labels": ["lidra-detected"],
             "name": f"LIDRA Detection: {event.get('attack_type', 'unknown')}",
             "description": event.get('description', f"Detected {event.get('attack_type', 'attack')} by LIDRA"),
-            "pattern": f"[ipv4-addr:value = '{event.get('ip_address', '')}']"
         }
         
         # Add MITRE if available

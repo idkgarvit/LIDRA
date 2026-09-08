@@ -2,7 +2,7 @@ import logging
 import time
 from collections import defaultdict
 from threading import Lock
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
