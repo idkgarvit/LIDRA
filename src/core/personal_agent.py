@@ -25,7 +25,14 @@ class LIDRAPersonal(LIDRACore):
     """Laptop / same-machine mode — AF_PACKET capture + iptables DROP."""
 
     def _init_mode_components(self):
-        iface = detect_interface()
+        # Config-first, then auto-detect: `--interface` / local.interface must
+        # win over heuristic detection, or on a box with both a dead eth0 and
+        # a live wlan0 every local-mode consumer targets the wrong NIC.
+        configured = (
+            self.config.get("local", {}).get("interface")
+            or self.config.get("collectors", {}).get("network", {}).get("interface")
+        )
+        iface = detect_interface(configured)
         if iface and os.path.exists(f"/sys/class/net/{iface}/wireless"):
             logger.warning(f"[WiFi] Interface {iface} is wireless — using AF_PACKET")
 
