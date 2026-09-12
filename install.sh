@@ -131,6 +131,11 @@ if mode == "laptop":
     cfg.setdefault("local", {})["inline"] = True
     cfg["local"]["monitor_only"] = not enforce
     resp["dry_run"] = not enforce
+    # A laptop is WiFi more often than not, so the queue rule would sit on the
+    # same physical link the operator needs to look up a fix. Fail open unless
+    # they asked for enforcement explicitly.
+    if not enforce:
+        cfg["local"]["inline"] = False
 else:
     cfg["mode"] = "inline"
     resp["dry_run"] = not enforce
@@ -156,9 +161,10 @@ if [ "$MODE" = "laptop" ]; then
     cat <<EOF
 
 ${GREEN}LIDRA laptop shield installed.${NC}
-  Incoming traffic to this machine now passes LIDRA first.
-$([ "$ENFORCE" = "enforce" ] && echo "  Enforcement ON: attacks are dropped before your apps." || echo "  Monitor-first: attacks are logged, nothing dropped yet.
-  To enforce: set local.monitor_only: false + response.dry_run: false
+$([ "$ENFORCE" = "enforce" ] && echo "  Enforcement ON: attacks are dropped before your apps." || echo "  Monitor-only: attacks are detected and logged, nothing dropped yet,
+  and no kernel queue rule is installed (so your network cannot break
+  because of LIDRA). To enforce: set local.inline: true and
+  local.monitor_only: false + response.dry_run: false
   in $PREFIX/config/config.yaml, then: systemctl restart lidra")
 EOF
 else
