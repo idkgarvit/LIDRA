@@ -67,10 +67,16 @@ local:
   interface: null  # auto-detect if null
   nfqueue_num: 0
   nfqueue_maxlen: 1024
-  inline: true       # PHASE-1 LIVE TEST: hold inbound INPUT via NFQUEUE (monitor_only still accepts)
+  # `inline: true` installs a kernel NFQUEUE rule on THIS machine's inbound
+  # path. That is a real interception point: if the rule lands without a
+  # working consumer the host loses connectivity (reproduced on Kali
+  # 7.1.5 — see docs/SAFE_LINK.md). Off by default so a plain `lidra`
+  # start can never lock you out of your own box. Without it, LIDRA
+  # captures with AF_PACKET and blocks with iptables rules.
+  inline: false      # opt in with `lidra --local-inline` (or set true here)
   monitor_only: true # true = accept everything, only log what WOULD drop.
-                     # Set false (with inline: true) to really drop. Enforce
-                     # needs this explicit opt-in — never silently drops.
+                     # Enforce needs inline: true AND monitor_only: false —
+                     # this is an explicit opt-in pair, never implicit.
 
 # Inline Engine Configuration
 inline:

@@ -57,6 +57,23 @@ def _require_root():
         sys.exit(1)
 
 
+# Local (laptop) mode installs a kernel-level queue rule on the host's own
+# inbound path. That is the one mode where a bug takes the user's network
+# down with it, so it is opt-in: `local.inline: true` in config.yaml, or
+# `lidra --local-inline` on the command line. Absent both, LIDRA monitors
+# the interface (AF_PACKET) and blocks by iptables rule — it cannot drop the
+# first packet, but it also cannot lock the operator out of their own box.
+LOCAL_INLINE_ENV = "LIDRA_LOCAL_INLINE"
+
+
+def _local_inline_opt_in(config: dict) -> bool:
+    """True only when the operator explicitly asked for inline interception."""
+    env = os.environ.get(LOCAL_INLINE_ENV)
+    if env is not None:
+        return env in ("1", "true", "yes")
+    return bool((config.get("local", {}) or {}).get("inline", False))
+
+
 def _setup_logging(verbose: bool = False):
     log_dir = BASE / "logs"
     log_dir.mkdir(exist_ok=True)
@@ -232,6 +249,11 @@ def main():
     parser.add_argument("--no-dry-run", dest="dry_run", action="store_false", help="Allow real blocking")
     parser.add_argument("--verbose", action="store_true", help="DEBUG logging")
     parser.add_argument("--interface", default=None, help="Capture interface (overrides config)")
+    parser.add_argument("--local-inline", dest="local_inline", action="store_true", default=None,
+                        help="Opt in to kernel inline interception in local mode "
+                             "(installs an NFQUEUE rule on the host's inbound path)")
+    parser.add_argument("--no-local-inline", dest="local_inline", action="store_false",
+                        help="Force monitor mode in local mode (default)")
     args = parser.parse_args()
 
     _setup_logging(verbose=args.verbose)
@@ -283,6 +305,14 @@ def main():
         config.setdefault("general", {})["verbose"] = True
     if args.interface:
         config.setdefault("collectors", {}).setdefault("network", {})["interface"] = args.interface
+    if args.local_inline is not None:
+        config.setdefault("local", {})["inline"] = args.local_inline
+    if config.get("mode") == "local" and not _local_inline_opt_in(config):
+        logger.info(
+            "[Agent] Local mode: monitor-only capture (AF_PACKET). Inline "
+            "interception is opt-in — pass --local-inline or set "
+            "local.inline: true to install a kernel queue rule."
+        )
     lidra = LIDRAv3(config)
 
     def _shutdown(signum, frame):

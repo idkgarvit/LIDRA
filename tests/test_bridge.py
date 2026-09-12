@@ -419,6 +419,107 @@ class TestInlineEngineChainSelection(unittest.TestCase):
         self.assertEqual(ie._apply_nf_verdict(Verdict.DROP), 0)
 
 
+class TestQueueRuleAlwaysBypass(unittest.TestCase):
+    """A LIDRA queue rule that lacks `bypass` parks every matching packet in
+    the kernel when the agent dies, with nothing to answer it. That was
+    reproduced live: connectivity to 1.1.1.1 stopped until the rule was
+    deleted. These tests pin the invariant that no rule we emit can do that.
+    """
+
+    def _make_engine(self, config):
+        from bridge.inline_engine import InlineEngine
+        return InlineEngine(config)
+
+    def test_bypass_added_when_absent(self):
+        from bridge.safe_link import always_bypass
+        args = ["nft", "add", "rule", "inet", "lidra_nfqueue", "input",
+                "queue", "num", "0"]
+        self.assertIn("bypass", always_bypass(args))
+
+    def test_bypass_not_duplicated(self):
+        from bridge.safe_link import always_bypass
+        args = ["queue", "num", "0", "bypass"]
+        out = always_bypass(args)
+        self.assertEqual(out.count("bypass"), 1)
+
+    def test_non_queue_rules_untouched(self):
+        from bridge.safe_link import always_bypass
+        args = ["nft", "add", "table", "inet", "lidra_nfqueue"]
+        self.assertEqual(always_bypass(args), args)
+
+    def test_built_nft_rule_commands_carry_bypass(self):
+        """Drive _setup_nfqueue_nft with subprocess mocked and inspect the
+        command LIDRA actually builds for the queue rule.
+        """
+        from bridge.inline_engine import InlineEngine
+        ie = self._make_engine({"mode": "local", "local": {"interface": "wlan0"}})
+        with patch.object(ie, "_get_interface", return_value="wlan0"):
+            with patch("bridge.inline_engine.subprocess.run") as run:
+                run.return_value = type("R", (), {"returncode": 0, "stdout": "", "stderr": b""})()
+                ok = ie._setup_nfqueue_nft("input")
+        self.assertTrue(ok)
+        queue_cmds = [c for c in run.call_args_list
+                      if "queue" in c[0][0] and "num" in c[0][0]]
+        self.assertTrue(queue_cmds, "no queue rule command was built")
+        for call in queue_cmds:
+            self.assertIn("bypass", call[0][0])
+
+
+class TestSafeLinkWatchdog(unittest.TestCase):
+    """The guard must report, never silently stop protecting."""
+
+    def _make(self):
+        from bridge.safe_link import SafeLink
+        return SafeLink(config={}, interface="wlan0", table="lidra_nfqueue",
+                        family="inet", alert_callback=None, dry_run=True)
+
+    def test_reports_rule_lost(self):
+        sl = self._make()
+        sl._armed_at = 0  # past the 10s grace period
+        with patch.object(sl, "rule_present", return_value=False), \
+             patch.object(sl, "queue_has_consumer", return_value=True):
+            sl._check_once()
+        self.assertTrue(sl.rolled_back)
+        self.assertEqual(sl.events[0]["type"], "safe_link_rule_lost")
+
+    def test_reports_consumer_lost(self):
+        sl = self._make()
+        with patch.object(sl, "rule_present", return_value=True), \
+             patch.object(sl, "queue_has_consumer", return_value=False):
+            sl._check_once()
+        self.assertEqual(sl.events[0]["type"], "safe_link_consumer_lost")
+
+    def test_quiet_when_healthy(self):
+        sl = self._make()
+        with patch.object(sl, "rule_present", return_value=True), \
+             patch.object(sl, "queue_has_consumer", return_value=True):
+            sl._check_once()
+        self.assertFalse(sl.rolled_back)
+        self.assertEqual(sl.events, [])
+
+    def test_grace_period_suppresses_startup_race(self):
+        """BIND can win before `nft add rule` lands; that must not alert."""
+        import time as _t
+        sl = self._make()
+        sl._armed_at = _t.time()
+        with patch.object(sl, "rule_present", return_value=False), \
+             patch.object(sl, "queue_has_consumer", return_value=True):
+            sl._check_once()
+        self.assertFalse(sl.rolled_back)
+
+    def test_alert_callback_fires_once_per_window(self):
+        calls = []
+        from bridge.safe_link import SafeLink
+        sl = SafeLink(config={}, interface="wlan0", table="lidra_nfqueue",
+                      family="inet", alert_callback=calls.append, dry_run=True)
+        with patch.object(sl, "rule_present", return_value=True), \
+             patch.object(sl, "queue_has_consumer", return_value=False):
+            sl._check_once()
+            sl._check_once()
+            sl._check_once()
+        self.assertEqual(len(calls), 1)
+
+
 class TestInitBridgeModeAttributes(unittest.TestCase):
     """Verify _init_bridge_mode() initializes TUI attributes unconditionally
     so that _push_tui_event() does not raise AttributeError when HAS_BRIDGE

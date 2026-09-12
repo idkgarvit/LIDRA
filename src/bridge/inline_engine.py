@@ -57,6 +57,7 @@ from bridge.connection_tracker import ConnectionTracker
 from bridge.forensics import ForensicRecorder
 from bridge.stream_reassembler import StreamReassembler
 from detection.dpi_engine import DPIEngine
+from bridge.safe_link import SafeLink, always_bypass
 
 
 class InlineEngine:
@@ -79,6 +80,11 @@ class InlineEngine:
         self._queue_maxlen = int((config.get("bridge", {}) or {}).get("nfqueue_maxlen")
                                  or local_cfg.get("nfqueue_maxlen") or 1024)
         self._nfqueue_family = "inet"  # recorded by _setup_nfqueue_nft; teardown removes the same family
+        self._nfqueue_table = None
+        self._nfqueue_iface = None
+        # Armed after the netlink consumer BINDs; watches that the queue rule
+        # both survives and still has a consumer. See bridge/safe_link.py.
+        self._safe_link: Optional[SafeLink] = None
         self._ct_time = 0.0
         self._ct_solicited = set()  # conntrack-backed solicited keys, 1s refresh
         self._own_time = 0.0  # own-IP refresh (v6 privacy extensions rotate)
@@ -1070,6 +1076,17 @@ class InlineEngine:
             self._nfq_set_copy_mode(sock, queue_num, NFQNL_COPY_PACKET, 0xFFFF)
             self._nfq_set_queue_maxlen(sock, queue_num, self._queue_maxlen)
             logger.info(f"[InlineEngine] NFQUEUE consumer bound to queue {queue_num} (monitor_only={self._monitor_only})")
+            # Only now can a queue rule be considered safe: a consumer exists.
+            # The guard fails the link OPEN (loudly) if that stops being true.
+            self._safe_link = SafeLink(
+                config=self._config,
+                interface=self._nfqueue_iface or self._get_interface(),
+                table=self._nfqueue_table or self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"),
+                family=self._nfqueue_family,
+                alert_callback=self._on_detection_callback,
+                dry_run=self._monitor_only,
+            )
+            self._safe_link.arm()
         except Exception as e:
             if sock:
                 sock.close()
@@ -1248,29 +1265,36 @@ class InlineEngine:
         interface = self._get_interface()
         queue_num = self._queue_num
         nft_tool, nft_family, hook_priority, hook = self._nfqueue_nft_params(chain)
+        table = self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")
+        # ponytail: a table left behind by a killed agent is an orphan queue
+        # rule — drop it before installing ours so we never stack two.
+        subprocess.run(["nft", "delete", "table", nft_family, table],
+                       capture_output=True, timeout=5)
         try:
-            subprocess.run([nft_tool, "add", "table", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
+            subprocess.run([nft_tool, "add", "table", nft_family, table],
                            capture_output=True, timeout=5)
-            subprocess.run([nft_tool, "add", "chain", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain,
+            subprocess.run([nft_tool, "add", "chain", nft_family, table, chain,
                            "{", "type", "filter", "hook", hook, "priority", f"{hook_priority};",
                            "policy", "accept;", "}"],
                            capture_output=True, timeout=5)
-            subprocess.run([nft_tool, "flush", "chain", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain],
+            subprocess.run([nft_tool, "flush", "chain", nft_family, table, chain],
                            capture_output=True, timeout=5)
-            cmd = [nft_tool, "add", "rule", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain,
+            cmd = [nft_tool, "add", "rule", nft_family, table, chain,
                    "meta", "iifname", interface,
-                   "queue", "num", str(queue_num), "bypass"]
-            result = subprocess.run(cmd, capture_output=True, timeout=5)
+                   "queue", "num", str(queue_num)]
+            result = subprocess.run(always_bypass(cmd), capture_output=True, timeout=5)
             if result.returncode != 0:
-                cmd = [nft_tool, "add", "rule", nft_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue"), chain,
-                       "queue", "num", str(queue_num), "bypass"]
-                result = subprocess.run(cmd, capture_output=True, timeout=5)
+                cmd = [nft_tool, "add", "rule", nft_family, table, chain,
+                       "queue", "num", str(queue_num)]
+                result = subprocess.run(always_bypass(cmd), capture_output=True, timeout=5)
                 if result.returncode != 0:
                     logger.warning(f"[InlineEngine] nft queue rule failed: {result.stderr.decode()}")
                     self._teardown_nfqueue_nft()
                     return False
             logger.info(f"[InlineEngine] nftables queue {queue_num} on {interface} (chain={chain})")
             self._nfqueue_family = nft_family
+            self._nfqueue_table = table
+            self._nfqueue_iface = interface
             return True
         except Exception as e:
             logger.warning(f"[InlineEngine] nftables setup error: {e}")
@@ -1278,8 +1302,11 @@ class InlineEngine:
             return False
 
     def _teardown_nfqueue_nft(self):
+        if self._safe_link:
+            self._safe_link.disarm()
         try:
-            subprocess.run(["nft", "delete", "table", self._nfqueue_family, self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
+            subprocess.run(["nft", "delete", "table", self._nfqueue_family,
+                            self._config.get("nftables", {}).get("queue_table", "lidra_nfqueue")],
                            capture_output=True, timeout=5)
         except Exception as e:
             logger.warning(f"[InlineEngine] NFQUEUE teardown skipped: {e}")
