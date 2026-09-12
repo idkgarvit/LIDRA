@@ -281,6 +281,11 @@ class LIDRACore(ABC):
                 if source_ip not in no_block:
                     if not self.is_dry_run:
                         self._block_ip(source_ip, f"inline_{attack_type}")
+                        try:
+                            from metrics import collector as _m
+                            _m.record_block("inline")
+                        except Exception:
+                            pass
                         self._push_tui_event({"type": "block", "data": {
                             "ip": source_ip,
                             "reason": f"Inline detection: {attack_type}",
@@ -450,15 +455,27 @@ class LIDRACore(ABC):
                 if self.inline_engine:
                     try:
                         stats = self.inline_engine.get_stats()
+                        cpu = psutil.cpu_percent(interval=None)
+                        mem = psutil.virtual_memory().percent
+                        active = self.inline_engine.connection_tracker.get_stats().get("active_connections", 0)
+                        # Prometheus gauges — this loop is already the agent's
+                        # 1 Hz stats tick, so the write costs nothing extra.
+                        try:
+                            from metrics import collector as _m
+                            _m.set_gauges_from_stats(stats, cpu_percent=cpu,
+                                                     memory_percent=mem)
+                            _m.set_gauges(active_connections=active)
+                        except Exception:
+                            pass
                         self._push_tui_event({"type": "packet", "data": {
                             "pkts_per_sec": round(stats.get("packet_rate", 0), 1),
                             "mbps": round(stats.get("packets_in", 0) * 1500 / 1_000_000, 2),
                             "timestamp": datetime.now().isoformat(),
                         }})
                         self._push_tui_event({"type": "stats", "data": {
-                            "cpu_usage": psutil.cpu_percent(interval=None),
-                            "memory_usage": psutil.virtual_memory().percent,
-                            "active_connections": self.inline_engine.connection_tracker.get_stats().get("active_connections", 0),
+                            "cpu_usage": cpu,
+                            "memory_usage": mem,
+                            "active_connections": active,
                         }})
                     except Exception:
                         pass  # best-effort TUI stats

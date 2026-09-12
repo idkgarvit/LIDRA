@@ -59,6 +59,22 @@ from bridge.stream_reassembler import StreamReassembler
 from detection.dpi_engine import DPIEngine
 from bridge.safe_link import SafeLink, always_bypass
 
+try:
+    from metrics import collector as _metrics
+except Exception:  # metrics is optional; never block the engine on it
+    class _MetricsNoop:
+        @staticmethod
+        def record_verdict(*a, **kw): pass
+        @staticmethod
+        def record_detection(*a, **kw): pass
+        @staticmethod
+        def record_latency(*a, **kw): pass
+        @staticmethod
+        def set_gauges(*a, **kw): pass
+        @staticmethod
+        def set_gauges_from_stats(*a, **kw): pass
+    _metrics = _MetricsNoop()
+
 
 class InlineEngine:
     def __init__(self, config: dict, db=None, detector=None,
@@ -775,6 +791,15 @@ class InlineEngine:
                 self._drop_count += 1
             elif verdict == Verdict.RATE_LIMIT:
                 self._rate_limit_count += 1
+
+        # Prometheus write side. Counters only here — nothing on this path may
+        # format strings, touch the DB or take a lock other than the one above.
+        _metrics.record_verdict(verdict)
+        _metrics.record_latency(latency / 1000.0)
+        if detections:
+            for d in detections:
+                _metrics.record_detection(d.get("attack_type", "unknown"),
+                                          d.get("severity", "medium"))
 
         if detections and self._on_detection_callback:
             for d in detections:
