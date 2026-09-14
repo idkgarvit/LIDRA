@@ -9,6 +9,11 @@ expected_attack_types:
   - syn_flood
   - flood
 expected_min_confidence: 0.5
-expected_min_packets_with_detection: 500
+# Was 500. That count measured how many times the sliding-window detectors
+# re-reported the same flood, not how many times it was detected. Post
+# alert-gate (detection/alert_gate.py), one 5,000-packet flood from one source
+# produces a handful of distinct alerts — the assertion that matters is the
+# matched attack types above.
+expected_min_packets_with_detection: 1
 expected_source_ips:
   - "10.99.99.99"

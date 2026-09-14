@@ -6,9 +6,17 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Per-IP, per-detector suppression window. Same defect class as
+# timing_analyzer: a detector whose sliding window keeps holding its trigger
+# condition re-reported on every subsequent packet. These detectors all keep
+# their window after firing, so an IP that ever crossed a threshold stayed a
+# permanent detection source — on a live run that turned into tens of
+# thousands of identical alert rows per hour.
+DEFAULT_COOLDOWN_SECONDS = 300.0
+
 
 class BehavioralAnalyzer:
-    def __init__(self):
+    def __init__(self, cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS):
         self._syn_rates: Dict[str, deque] = defaultdict(lambda: deque(maxlen=60))
         self._packet_rates: Dict[str, deque] = defaultdict(lambda: deque(maxlen=120))
         self._protocol_use: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -16,18 +24,51 @@ class BehavioralAnalyzer:
         self._conn_open: Dict[str, float] = {}
         self._last_cleanup = time.time()
         self._lock = Lock()
+        self._cooldown = float(cooldown_seconds)
+        self._last_alert: Dict[str, Dict[str, float]] = defaultdict(dict)
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
         with self._lock:
             return self._analyze_locked(packet)
 
+    def _suppressed(self, ip: str, attack_type: str) -> bool:
+        last = self._last_alert.get(ip, {}).get(attack_type)
+        if last is None:
+            return False
+        return (time.monotonic() - last) < self._cooldown
+
+    def _keep(self, detections: List[Dict], ip: str,
+              reset: Optional[str] = None) -> Optional[List[Dict]]:
+        """Drop detections still inside their cooldown; record the rest.
+
+        `reset` names the sample store to clear so the same episode cannot
+        re-trigger the moment the cooldown lapses.
+        """
+        kept = []
+        for d in detections:
+            atype = d.get("attack_type", "unknown")
+            if self._suppressed(ip, atype):
+                continue
+            self._last_alert[ip][atype] = time.monotonic()
+            kept.append(d)
+            if reset == "syn" and atype == "syn_burst":
+                self._syn_rates[ip].clear()
+            elif reset == "pkt" and atype == "packet_burst":
+                self._packet_rates[ip].clear()
+            elif reset == "conn" and atype == "short_connection":
+                self._conn_durations[ip].clear()
+        return kept if kept else None
+
     def _analyze_locked(self, packet: Dict) -> Optional[List[Dict]]:
         detections = []
         self._cleanup_if_needed()
-        src_ip = packet.get("src_ip", "")
-        dst_ip = packet.get("dst_ip", "")
-        dst_port = packet.get("dst_port", 0)
-        flags = packet.get("flags", "")
+        src_ip = packet.get("src_ip") or ""
+        dst_ip = packet.get("dst_ip") or ""
+        dst_port = packet.get("dst_port") or 0
+        flags = packet.get("flags") or ""
+
+        if not src_ip:
+            return None
 
         # Skip broadcast/multicast/DHCP traffic to avoid FP
         if dst_ip.startswith("255.") or dst_ip.startswith("224.") or dst_ip.startswith("239."):
@@ -53,9 +94,9 @@ class BehavioralAnalyzer:
         if r:
             detections.append(r)
 
-        if "S" in flags and "A" not in flags:
+        if "S" in str(flags) and "A" not in str(flags):
             self._conn_open[src_ip] = time.time()
-        if "F" in flags or "R" in flags:
+        if "F" in str(flags) or "R" in str(flags):
             if src_ip in self._conn_open:
                 duration = time.time() - self._conn_open[src_ip]
                 self._conn_durations[src_ip].append(duration)
@@ -65,10 +106,14 @@ class BehavioralAnalyzer:
                     detections.append(r)
 
         self._packet_rates[src_ip].append(time.time())
-        return detections if detections else None
+        kept = self._keep(detections, src_ip, reset="syn")
+        if kept is None:
+            return None
+        # Apply the remaining per-type resets/cooldowns recorded inside _keep.
+        return kept
 
     def _check_syn_burst(self, ip: str, flags: str) -> Optional[Dict]:
-        if "S" not in flags or "A" in flags:
+        if "S" not in str(flags) or "A" in str(flags):
             return None
         now = time.time()
         self._syn_rates[ip].append(now)
@@ -103,11 +148,13 @@ class BehavioralAnalyzer:
 
     @staticmethod
     def _check_payload_bias(ip: str, packet: Dict) -> Optional[Dict]:
-        payload = packet.get("payload", b"")
-        plen = len(payload) if payload else 0
+        payload = packet.get("payload") or b""
+        if not isinstance(payload, (bytes, bytearray)):
+            return None
+        plen = len(payload)
         if plen == 0:
             return None
-        flags = packet.get("flags", "")
+        flags = str(packet.get("flags") or "")
         if "P" in flags and plen == 1:
             return {
                 "attack_type": "slow_drip",
@@ -118,20 +165,30 @@ class BehavioralAnalyzer:
         return None
 
     def _check_proto_switch(self, ip: str, packet: Dict) -> Optional[Dict]:
-        proto = packet.get("protocol", "")
+        """Flag multi-protocol use only once the host is clearly probing.
+
+        The old version returned on every packet once the host had used 3
+        protocols and 20 total packets, and `_protocol_use` was never cleared
+        outside the 120s full reset — so any device speaking e.g. TCP+UDP+DNS
+        became a permanent `proto_scan` source. It also counts a *rising*
+        protocol count as evidence, which is the opposite of the stated intent.
+        """
+        proto = packet.get("protocol") or "unknown"
         self._protocol_use[ip][proto] += 1
         total = sum(self._protocol_use[ip].values())
-        if total > 20:
-            count = len(self._protocol_use[ip])
-            if count >= 3:
-                protos = list(self._protocol_use[ip].keys())
-                return {
-                    "attack_type": "proto_scan",
-                    "severity": "low",
-                    "source_ip": ip,
-                    "details": f"Multi-protocol usage: {protos} (possible probing)",
-                }
-        return None
+        if total < 50:
+            return None
+        count = len(self._protocol_use[ip])
+        if count < 3:
+            return None
+        if self._suppressed(ip, "proto_scan"):
+            return None
+        return {
+            "attack_type": "proto_scan",
+            "severity": "low",
+            "source_ip": ip,
+            "details": f"Multi-protocol usage: {list(self._protocol_use[ip].keys())} (possible probing)",
+        }
 
     def _check_short_connections(self, ip: str, duration: float) -> Optional[Dict]:
         # A single short connection is normal HTTP. Only flag if MANY
@@ -160,3 +217,11 @@ class BehavioralAnalyzer:
             self._conn_durations.clear()
             self._conn_open.clear()
             self._last_cleanup = time.time()
+        # Prune lapsed cooldowns so the dict cannot grow without bound.
+        for ip in list(self._last_alert.keys()):
+            live = {t: ts for t, ts in self._last_alert[ip].items()
+                    if (time.monotonic() - ts) < self._cooldown}
+            if live:
+                self._last_alert[ip] = live
+            else:
+                del self._last_alert[ip]

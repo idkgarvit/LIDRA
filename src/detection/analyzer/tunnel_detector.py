@@ -29,7 +29,11 @@ class TunnelDetector:
         payload = packet.get("payload", b"")
         plen = len(payload) if payload else 0
 
-        if protocol == "dns" or dst_port == 53:
+        # DNS is a transport *payload*, not a transport protocol: the parser
+        # reports "udp"/"tcp" and the service is identified by port 53. Gating
+        # on `protocol == "dns"` meant this never ran — dnscat2 (434/434 packets
+        # on port 53) was not detected by this analyzer at all.
+        if protocol == "dns" or dst_port == 53 or packet.get("src_port") == 53:
             r = self._dns_tunnel(src_ip, dst_ip, plen)
             if r:
                 detections.append(r)

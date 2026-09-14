@@ -463,8 +463,8 @@ class LIDRACore(ABC):
                         try:
                             from metrics import collector as _m
                             _m.set_gauges_from_stats(stats, cpu_percent=cpu,
-                                                     memory_percent=mem)
-                            _m.set_gauges(active_connections=active)
+                                                     memory_percent=mem,
+                                                     active_connections=active)
                         except Exception:
                             pass
                         self._push_tui_event({"type": "packet", "data": {

@@ -120,13 +120,20 @@ def set_gauges(active_connections: Optional[int] = None,
 
 def set_gauges_from_stats(stats: dict,
                           cpu_percent: Optional[float] = None,
-                          memory_percent: Optional[float] = None) -> None:
-    """Convenience: push an InlineEngine.get_stats() dict into the gauges."""
+                          memory_percent: Optional[float] = None,
+                          active_connections: Optional[int] = None) -> None:
+    """Convenience: push an InlineEngine.get_stats() dict into the gauges.
+
+    `active_connections` is a separate argument because get_stats() does not
+    carry it — it lives on the connection tracker, not the engine. Reading it
+    from the stats dict was a bug: `.get()` returned None and the gauge was
+    silently never updated.
+    """
     if not _HAS or not isinstance(stats, dict):
         return
     packets = stats.get("packets_in", 0) or 0
     set_gauges(
-        active_connections=stats.get("active_connections"),
+        active_connections=active_connections,
         cpu_percent=cpu_percent,
         memory_percent=memory_percent,
         rate_pps=stats.get("packet_rate"),

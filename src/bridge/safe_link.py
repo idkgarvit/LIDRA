@@ -78,13 +78,15 @@ class SafeLink:
     """
 
     def __init__(self, config: dict, interface: str, table: str, family: str = "inet",
-                 alert_callback: Optional[Callable] = None, dry_run: bool = True):
+                 alert_callback: Optional[Callable] = None, dry_run: bool = True,
+                 queue_num: int = 0):
         self._config = config
         self._interface = interface
         self._table = table
         self._family = family
         self._alert_callback = alert_callback
         self._dry_run = dry_run
+        self._queue_num = int(queue_num)
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._armed_at = 0.0
@@ -134,17 +136,29 @@ class SafeLink:
         return has_queue and has_iface
 
     def queue_has_consumer(self) -> bool:
-        """True if some process is bound to a netfilter queue.
+        """True if OUR queue has a consumer bound.
 
-        /proc/net/netfilter/nfnetlink_queue lists one row per bound queue.
-        An empty file (or a missing file) means no consumer exists and any
-        non-bypass rule would be blocking traffic.
+        /proc/net/netfilter/nfnetlink_queue has one row per bound queue; the
+        first column is the queue number and the second is the owning process
+        pid. Checking only for a non-empty file was too loose: any other
+        NFQUEUE consumer on the box (fail2ban with an nfqueue action, some
+        other IDS) would read as "our queue is fine" while ours had died.
         """
         try:
             with open("/proc/net/netfilter/nfnetlink_queue") as f:
-                return bool(f.read().strip())
+                rows = f.read().strip().splitlines()
         except OSError:
             return False
+        for row in rows:
+            cols = row.split()
+            if not cols:
+                continue
+            try:
+                if int(cols[0]) == int(self._queue_num):
+                    return True
+            except (ValueError, IndexError):
+                continue
+        return False
 
     def probe_connectivity(self, target: str = "1.1.1.1") -> bool:
         """Best-effort external reachability probe (guard thread only)."""

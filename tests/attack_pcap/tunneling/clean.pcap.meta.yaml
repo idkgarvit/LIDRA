@@ -6,17 +6,19 @@ mitre: null
 severity: info
 expected_attack_types: []     # Must be empty — no FP allowed
 expected_min_confidence: 0.0
-expected_max_false_positives: 500
-fp_rate_baseline: 0.073
+expected_max_false_positives: 20
+fp_rate_baseline: 0.003
 notes: |
-  1MB of normal DNS traffic. Used to confirm we don't flag normal
-  DNS as tunneling.
+  1MB of normal DNS traffic.
 
-  CURRENT FP RATE: 7.3% (364/4956 packets flagged).
-  - ipv6_tunnel: 314x — false positive on encoded DNS names
-  - command_injection: 40x — false on DNS base64 payloads
-  - dns_tunnel: 8x — borderline; high-entropy queries trigger this
-  - session_correlated_*: 4x
+  FP rate history (see detection/alert_gate.py, detection/analyzer/ipv6_analyzer.py,
+  and the DPI binary-protocol gate in detection/dpi_engine.py for the fixes):
+    - 7.3% (364/4956) — original
+    - 0.26% (13/4956) — after ipv6_tunnel was stopped from matching a DNS
+      transaction-ID high nibble, DPI was forbidden on binary protocols
+      (dns/tls/...), and the alert gate collapsed per-packet repeats.
 
-  Threshold of 500 catches regression (currently 364).
-  Tracked in COVERAGE.md as remaining tuning debt.
+  Remaining hits are a small number of dns_tunnel (high-entropy query
+  borderline) and the baseline detectors — listed in COVERAGE.md as remaining
+  tuning debt.
+

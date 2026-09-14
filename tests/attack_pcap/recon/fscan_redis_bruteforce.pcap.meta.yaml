@@ -8,7 +8,20 @@ expected_attack_types:
   - port
   - syn
 expected_min_confidence: 0.5
-expected_min_packets_with_detection: 50
+# Lowered from 50. The old expectation was not measuring detection — it was
+# measuring how many times the old behavioral/port analyzers re-reported the
+# same burst, because their sliding windows kept holding the trigger condition
+# (the previous note here recorded "port_scan pattern (112x)", which is that
+# defect, not 112 distinct findings). A brute-force run should raise a small
+# number of distinct alerts; a large packet-flag count is a false-positive
+# signal, not a detection-quality signal. The assertions that matter for this
+# capture are the matched attack types above.
+expected_min_packets_with_detection: 1
 notes: |
-  Same as fscan_mysql — LIDRA sees the port_scan pattern (112x) but
-  lacks a specific bruteforce signature. Tracked in COVERAGE.md.
+  Same as fscan_mysql — LIDRA sees the scan/bruteforce burst pattern but lacks
+  a specific Redis bruteforce signature. Tracked in COVERAGE.md.
+
+  Do not raise expected_min_packets_with_detection back toward the raw packet
+  count. Per-packet alert counts conflate "detected" with "how often the
+  detector repeated itself"; alert volume is tracked by the false-positive
+  tests instead (tests/test_timing_analyzer.py, tests/test_behavioral_analyzer.py).

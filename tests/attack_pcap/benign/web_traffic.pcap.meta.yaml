@@ -11,11 +11,15 @@ notes: |
   Small but representative. 1200 packets of normal HTTP traffic.
   Used as the "this is what normal looks like" baseline.
 
-  CURRENT FP RATE: 7.75% (93/1200 packets flagged).
-  - low_entropy_isn: 71x — still FP-prone (consecutive ISNs in tests
-    happen to be similar). Real networks show more entropy.
-  - session_correlated_sql_attack: 18x — false positive in correlator
-  - short_connection: 4x
+  FP history:
+    - 93 flagged (7.75%) originally
+    - dominated by low_entropy_isn (71x) — the synthetic ISNs happen to
+      land within the detector's "consecutive ISNs are spoofed" band; real
+      networks show more entropy — plus session_correlated_sql_attack (18x)
+      on what look like base64 CDN responses.
+    - The packet count did not change materially after the alert gate
+      (only ~1 packet was architecturally suppressed); was never the
+      dominant noise source here.
 
-  Threshold of 150 catches regression (currently 93, 57 buffer).
-  Tracked as remaining tuning debt in COVERAGE.md.
+  Threshold of 150 catches regression. Tracked as remaining tuning debt
+  in COVERAGE.md.

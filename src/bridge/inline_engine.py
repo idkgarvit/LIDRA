@@ -57,6 +57,7 @@ from bridge.connection_tracker import ConnectionTracker
 from bridge.forensics import ForensicRecorder
 from bridge.stream_reassembler import StreamReassembler
 from detection.dpi_engine import DPIEngine
+from detection.alert_gate import AlertGate
 from bridge.safe_link import SafeLink, always_bypass
 
 try:
@@ -101,6 +102,11 @@ class InlineEngine:
         # Armed after the netlink consumer BINDs; watches that the queue rule
         # both survives and still has a consumer. See bridge/safe_link.py.
         self._safe_link: Optional[SafeLink] = None
+        # Collapses per-packet repeats into one alert per (source, type) per
+        # cooldown window. See detection/alert_gate.py for the measurements.
+        _cooldown = float((config.get("detection", {}) or {})
+                          .get("alert_cooldown_seconds", 300) or 300)
+        self._alert_gate = AlertGate(cooldown_seconds=_cooldown)
         self._ct_time = 0.0
         self._ct_solicited = set()  # conntrack-backed solicited keys, 1s refresh
         self._own_time = 0.0  # own-IP refresh (v6 privacy extensions rotate)
@@ -710,7 +716,8 @@ class InlineEngine:
                     app_proto = conn.app_protocol if conn else ""
                     run_dpi = True
                     for msg in messages:
-                        dpi_result = self._dpi_engine.inspect_stream(msg, app_proto)
+                        dpi_result = self._dpi_engine.inspect_stream(
+                            msg, app_proto, dst_port=dst_port, src_port=src_port)
                         if dpi_result:
                             detections.append({
                                 "attack_type": dpi_result.attack_type,
@@ -771,6 +778,12 @@ class InlineEngine:
                     detections.extend(result)
             except Exception as e:
                 logger.warning(f"[{type(analyzer).__name__}] analyzer error: {e}")
+
+        # One alert per (source, attack type) per cooldown. Without this every
+        # detector repeats itself on every packet its window still matches —
+        # measured 3,202 syn_flood alerts for a single attacker in one scan.
+        # Raw detections are recorded in the counters; only alerts are gated.
+        detections = self._alert_gate.filter(detections, source_ip=src_ip) or []
 
         if detections:
             self._flow_cache.mark_suspicious(flow_key)
@@ -1110,6 +1123,7 @@ class InlineEngine:
                 family=self._nfqueue_family,
                 alert_callback=self._on_detection_callback,
                 dry_run=self._monitor_only,
+                queue_num=queue_num,
             )
             self._safe_link.arm()
         except Exception as e:

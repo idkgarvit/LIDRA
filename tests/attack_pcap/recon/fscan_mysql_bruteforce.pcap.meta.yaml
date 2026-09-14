@@ -9,9 +9,10 @@ expected_attack_types:
   - syn
   - scan
 expected_min_confidence: 0.5
-expected_min_packets_with_detection: 100
+# Was 100 — measured re-report volume, not distinct detections. See
+# detection/alert_gate.py.
+expected_min_packets_with_detection: 1
 notes: |
-  LIDRA detects this as port_scan (2884x) + syn_burst + short_connection
-  but does NOT have a specific 'bruteforce' or 'auth_attack' signature.
-  The behavioral_analyzer should pick this up but currently doesn't
-  for MySQL handshake patterns. Tracked in COVERAGE.md.
+  LIDRA detects the burst (syn_burst/syn_flood/short_connection) and the
+  HTTPish content but has no specific MySQL/Redis bruteforce signature.
+  Tracked in COVERAGE.md.

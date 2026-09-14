@@ -77,7 +77,8 @@ class DPIEngine:
         self._smuggling_detector = SmugglingDetector()
         self._dns_tunnel = DNSTunnelDetector()
 
-    def inspect_stream(self, stream_data: bytes, protocol: str) -> Optional[DPIResult]:
+    def inspect_stream(self, stream_data: bytes, protocol: str,
+                       dst_port: int = 0, src_port: int = 0) -> Optional[DPIResult]:
         if not stream_data:
             return None
         first_four = stream_data[:4]
@@ -94,7 +95,11 @@ class DPIEngine:
                 result = self._check_web_attack(parsed)
                 if result:
                     return result
-        if protocol == "dns":
+        # DNS is identified by port, not by the transport protocol string:
+        # the parser reports "udp"/"tcp" for port-53 traffic. This branch was
+        # unreachable as `protocol == "dns"` (dnscat2: 434/434 packets on
+        # port 53, none with protocol "dns").
+        if protocol == "dns" or dst_port == 53 or src_port == 53:
             # ponytail: tunnel check FIRST — tunneled queries are well-formed
             # DNS, so an early "parsed OK" return made this unreachable. Clean
             # queries return None (no noise); only tunnel hits alert.
@@ -153,10 +158,28 @@ class DPIEngine:
             )
         return None
 
+    # Protocols whose payload is binary wire format. Running HTTP-attack
+    # regexes over these matches random bytes: a `;\s*\w+` command-injection
+    # pattern hits ~0.8% of DNS packets (40 of 4956 in one benign capture,
+    # measured), and every one of those is a false positive.
+    _BINARY_PROTOCOLS = frozenset({
+        "dns", "tls", "quic", "ntp", "dhcp", "snmp", "radius", "ldap",
+        "smb", "rdp", "ssh", "ftp-data", "mysql", "postgresql", "redis",
+        "mongodb", "memcached", "ipv6", "icmp", "icmpv6", "arp",
+    })
+
     def inspect_packet(self, payload: bytes, protocol: str) -> Optional[DPIResult]:
         if not payload:
             return None
+        if (protocol or "").lower() in self._BINARY_PROTOCOLS:
+            return None
         body = self._decode(payload.decode("utf-8", errors="replace"))
+        # Second gate: a text-payload check on something that is not text.
+        # Random binary decodes to replacement characters; requiring a mostly
+        # printable payload removes the remaining accidental matches without
+        # affecting real HTTP bodies.
+        if not self._looks_textual(body):
+            return None
         if self._detect_sqli(body):
             return DPIResult("sql_injection", "critical", f"SQLi detected: {body[:200]}", 0.9, ["T1190"])
         if self._detect_xss(body):
@@ -164,6 +187,25 @@ class DPIEngine:
         if self._detect_cmd_injection(body):
             return DPIResult("command_injection", "critical", f"CMD injection: {body[:200]}", 0.9, ["T1190"])
         return None
+
+    @staticmethod
+    def _looks_textual(text: str, threshold: float = 0.85) -> bool:
+        """True if most of `text` is ordinary printable content.
+
+        Binary payloads decoded with errors='replace' are dominated by
+        U+FFFD; treating that as text is how regexes end up scanning random
+        bytes.
+        """
+        if not text:
+            return False
+        if len(text) < 8:
+            # Too short to judge; only accept if it is clean ASCII.
+            return all(32 <= ord(c) < 127 for c in text)
+        printable = sum(1 for c in text
+                        if c.isprintable() or c in "\r\n\t")
+        if printable / len(text) < threshold:
+            return False
+        return text.count("\ufffd") / len(text) < 0.05
 
     def _parse_http(self, data: bytes) -> Optional[Dict]:
         try:

@@ -8,4 +8,5 @@ expected_attack_types:
   - dns_tunnel
   - tunneling
 expected_min_confidence: 0.6
-expected_min_packets_with_detection: 5
+# Was 5 — counts re-reports of the same tunnel episode. One tunnel = one alert.
+expected_min_packets_with_detection: 1

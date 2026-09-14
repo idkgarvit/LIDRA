@@ -8,7 +8,8 @@ expected_attack_types:
   - port_scan
   - scan
 expected_min_confidence: 0.5
-expected_min_packets_with_detection: 100
+# Was 100 — re-report volume; the gate makes one scan raise one port_scan alert.
+expected_min_packets_with_detection: 1
 expected_source_ips:
   - "10.99.99.99"
 notes: |
