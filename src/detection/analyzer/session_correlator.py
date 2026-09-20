@@ -7,9 +7,15 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# The SQL-comment token `/*` must not match the ordinary HTTP header
+# `Accept: */*`. That value appears on essentially every browser request, so
+# the old alternation fired on every `GET / HTTP/1.1` and produced 18
+# high-severity `session_correlated_sql_attack` alerts on a *benign* capture
+# (docs/PRODUCTION_READINESS.md §3.3). A `/*` that is itself preceded by `*`
+# is the tail of `*/*`, not a comment opener — hence the lookbehind.
 _PARTIAL_SQL = re.compile(
     r"(\bunion\b|\bselect\b|\bfrom\b|\bwhere\b|\bdrop\b|\binsert\b|\bdelete\b|"
-    r"'|--|/\*|@@|0x[0-9a-f]|\bor\b|\band\b)",
+    r"'|--|(?<!\*)/\*|@@|0x[0-9a-f]|\bor\b|\band\b)",
     re.IGNORECASE
 )
 _PARTIAL_XSS = re.compile(

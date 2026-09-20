@@ -22,6 +22,9 @@ class BehavioralAnalyzer:
         self._protocol_use: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._conn_durations: Dict[str, deque] = defaultdict(lambda: deque(maxlen=30))
         self._conn_open: Dict[str, float] = {}
+        # Connections from this host that were properly FIN/RST-closed — used to
+        # corroborate `short_connection` (a fast client, not a scan).
+        self._completed_conns: Dict[str, int] = defaultdict(int)
         self._last_cleanup = time.time()
         self._lock = Lock()
         self._cooldown = float(cooldown_seconds)
@@ -66,6 +69,12 @@ class BehavioralAnalyzer:
         dst_ip = packet.get("dst_ip") or ""
         dst_port = packet.get("dst_port") or 0
         flags = packet.get("flags") or ""
+        # Connection duration must be measured on the *capture* clock, not the
+        # pipeline clock: reading time.time() here made every connection in a
+        # pcap replay (which runs at CPU speed — 1200 packets in 0.095 s of real
+        # time) look like a sub-500 ms scan, so ordinary browsing was reported as
+        # `short_connection`. See InlineEngine._parse_packet(capture_ts=...).
+        now = packet.get("capture_ts") or time.time()
 
         if not src_ip:
             return None
@@ -95,17 +104,18 @@ class BehavioralAnalyzer:
             detections.append(r)
 
         if "S" in str(flags) and "A" not in str(flags):
-            self._conn_open[src_ip] = time.time()
+            self._conn_open[src_ip] = now
         if "F" in str(flags) or "R" in str(flags):
             if src_ip in self._conn_open:
-                duration = time.time() - self._conn_open[src_ip]
+                duration = now - self._conn_open[src_ip]
                 self._conn_durations[src_ip].append(duration)
+                self._completed_conns[src_ip] += 1
                 del self._conn_open[src_ip]
                 r = self._check_short_connections(src_ip, duration)
                 if r:
                     detections.append(r)
 
-        self._packet_rates[src_ip].append(time.time())
+        self._packet_rates[src_ip].append(now)
         kept = self._keep(detections, src_ip, reset="syn")
         if kept is None:
             return None
@@ -201,6 +211,13 @@ class BehavioralAnalyzer:
             return None
         short_count = sum(1 for d in recent if d < 0.5)
         if short_count >= 10:
+            # Corroborate: "many short connections" is a scan only if the
+            # connections are also being *dropped*. A host whose handshakes all
+            # complete is a fast client — exactly what a pcap replayed at CPU
+            # speed looks like (measured: web_traffic's 200 connections span
+            # 0.095 s of capture time, so every one of them is "short").
+            if self._completed_conns.get(ip, 0) >= short_count:
+                return None
             return {
                 "attack_type": "short_connection",
                 "severity": "medium",
@@ -216,6 +233,7 @@ class BehavioralAnalyzer:
             self._protocol_use.clear()
             self._conn_durations.clear()
             self._conn_open.clear()
+            self._completed_conns.clear()
             self._last_cleanup = time.time()
         # Prune lapsed cooldowns so the dict cannot grow without bound.
         for ip in list(self._last_alert.keys()):

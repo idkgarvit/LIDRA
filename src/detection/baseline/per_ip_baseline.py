@@ -56,6 +56,12 @@ class PerIPBaseline:
         self._last_cleanup = time.time()
         self._last_hour = -1
         self._z_threshold = config.get("z_threshold", 3.0) if config else 3.0
+        # How many hour-samples before an "unusual hour" claim is allowed to
+        # mean anything. Without a floor, a fresh sensor flags whatever hour it
+        # was installed in — see the comment at the hour check below.
+        self._min_hour_observations = (
+            int(config.get("min_hour_observations", 200)) if config else 200
+        )
 
     def analyze(self, packet: Dict) -> Optional[List[Dict]]:
         self._cleanup_if_needed()
@@ -115,21 +121,37 @@ class PerIPBaseline:
                     self._pps[src_ip].update(window_pps)
                     self._bps[src_ip].update(window_bps)
 
+            # Time-of-day anomaly. Two guards, both of which were missing:
+            #
+            #   1. A baseline needs enough history to *be* a baseline. With only
+            #      a handful of active hours, `ratio` is tiny for any host, so a
+            #      freshly-installed sensor — or one that has been up for a few
+            #      hours — reports "unusual hours" for whatever it happens to be
+            #      doing. Require a minimum number of observations first.
+            #   2. "Near midnight" must not include the small hours of the
+            #      *same* day. `hour < 6 or hour > 22` makes 00:00-05:59 an
+            #      anomaly for every host, which fires on night-shift operators,
+            #      backups, cron jobs and anyone burning the midnight oil. The
+            #      signal worth keeping is activity at an hour this host has
+            #      never been active in *while it usually is active elsewhere*.
             if self._last_hour != hour and self._hour_activity[src_ip].get(hour, 0) < 2:
-                near_midnight = hour < 6 or hour > 22
-                if near_midnight and self._hour_activity[src_ip].get(hour, 0) > 0:
-                    total_hours = len([h for h, c in self._hour_activity[src_ip].items() if c > 0])
-                    if total_hours > 0:
-                        ratio = sum(1 for h in range(24) if self._hour_activity[src_ip].get(h, 0) > 0) / 24
-                        if ratio < 0.3:
-                            detections.append({
-                                "attack_type": "unusual_hours_activity",
-                                "severity": "low",
-                                "source_ip": src_ip,
-                                "details": f"Unusual activity at hour {hour}:00 (normally {ratio:.0%} of hours active)",
-                                "confidence": 0.3,
-                                "mitre": [],
-                            })
+                observations = sum(self._hour_activity[src_ip].values())
+                active_hours = sum(1 for c in self._hour_activity[src_ip].values() if c > 0)
+                # Need real history before claiming an hour is unusual, and
+                # enough spread that "this hour" is meaningful.
+                if observations >= self._min_hour_observations and active_hours >= 3:
+                    ratio = active_hours / 24
+                    if ratio < 0.3:
+                        detections.append({
+                            "attack_type": "unusual_hours_activity",
+                            "severity": "low",
+                            "source_ip": src_ip,
+                            "details": (f"Unusual activity at hour {hour}:00 "
+                                        f"(normally {ratio:.0%} of hours active, "
+                                        f"{observations} observations)"),
+                            "confidence": 0.3,
+                            "mitre": [],
+                        })
 
             self._last_hour = hour
 
