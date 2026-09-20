@@ -1,11 +1,17 @@
 # LIDRA systemd service unit
 #
 # To override paths (non-default install location, custom venv, etc.):
-#   1. Copy the relevant EnvironmentFile template:
-#        sudo cp /opt/lidra/install/default/lidra /etc/default/lidra
-#      Edit /etc/default/lidra and set LIDRA_ROOT / LIDRA_VENV / LIDRA_USER etc.
-#   2. Add `EnvironmentFile=/etc/default/lidra` under [Service] below.
-#   3. Reload: sudo systemctl daemon-reload && sudo systemctl restart lidra
+#   1. Create the override file:
+#        sudo mkdir -p /etc/systemd/system/lidra.service.d
+#        sudo tee /etc/systemd/system/lidra.service.d/override.conf <<'EOF'
+#        [Service]
+#        Environment=LIDRA_ROOT=/your/path
+#        ExecStart=/your/path/venv/bin/python3 /your/path/src/lidra_agent_v3.py --no-tui
+#        EOF
+#   2. Reload: sudo systemctl daemon-reload && sudo systemctl restart lidra
+#
+# (A drop-in is used rather than an EnvironmentFile template: the previous
+# comment pointed at install/default/lidra, which never existed in this repo.)
 
 [Unit]
 Description=LIDRA Intrusion Detection & Response Agent
@@ -18,7 +24,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=root
-Group=root
+Group=lidra
 WorkingDirectory=/opt/lidra
 # ponytail: --no-tui — no TTY under systemd; a spawned TUI would fail/spam.
 # Restart=always (not on-failure) — a clean-exit crash still leaves you blind.
@@ -29,13 +35,21 @@ RestartSec=5
 Environment=PYTHONUNBUFFERED=1
 Environment=LIDRA_ROOT=/opt/lidra
 
+# IPC socket home. systemd creates /run/lidra owned root:lidra mode 0750 so
+# the operator (added to the `lidra` group at install) can attach the TUI
+# without being root. /run is a tmpfs: stale sockets vanish on reboot, and —
+# unlike /tmp — it is not split by PrivateTmp, so the documented `lidra tui`
+# attach works from a normal shell. See utils/runtime.py.
+RuntimeDirectory=lidra
+RuntimeDirectoryMode=0750
+
 LimitNOFILE=65536
 LimitNPROC=4096
 NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=/opt/lidra /var/log/lidra
+ReadWritePaths=/opt/lidra /var/log/lidra /run/lidra
 
 StandardOutput=append:/var/log/lidra/service.log
 StandardError=append:/var/log/lidra/service_error.log

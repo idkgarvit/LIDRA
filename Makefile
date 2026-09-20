@@ -3,13 +3,21 @@
 
 # ponytail: `pytest`/`lint` run the Python suite (CI parity) — `test` is the
 # hardware XDP drop test and needs sudo + a NIC.
-.PHONY: all build clean test pytest lint run stop unload status block unblock install-deps verify help
+.PHONY: all build clean test pytest lint run stop unload status block unblock install-deps verify help install uninstall
 
 pytest:
 	@PYTHONPATH=src python3 -m pytest tests/ -q --tb=short
 
 lint:
 	@python3 -m flake8 src/ --max-line-length=120 --extend-ignore=E203,W503 --exclude=__pycache__ || true
+
+# Two-door installer (asks laptop/gateway) and the escape route. Both need
+# root: they touch systemd, /etc and the firewall.
+install:
+	@sudo ./install.sh
+
+uninstall:
+	@sudo ./install/uninstall.sh
 
 # Configuration
 SRC_DIR := $(shell pwd)

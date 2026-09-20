@@ -5,11 +5,15 @@
 #   curl -fsSL <url>/install.sh | bash -s -- --laptop   # laptop, non-interactive
 #   curl -fsSL <url>/install.sh | bash -s -- --gateway  # gateway, non-interactive
 #   ./install.sh --laptop --enforce                     # from a clone
+#   ./install.sh --uninstall                            # remove LIDRA (escape route)
 #
 # Flags:
 #   --laptop | --gateway     deployment mode (default: ask; required when non-interactive)
 #   --enforce | --monitor    block attacks, or accept-all + log what WOULD drop (default: --monitor)
 #   --prefix PATH            install root (default: /opt/lidra)
+#   --uninstall              remove LIDRA (delegates to install/uninstall.sh)
+#   --purge                  with --uninstall: also delete the database
+#   --yes                    with --uninstall: answer yes to prompts
 # Env passthrough to install/post_install.sh: LIDRA_NO_DEPS, LIDRA_NO_SERVICE,
 # LIDRA_NO_XDP, LIDRA_NO_ENABLE — all honored.
 #
@@ -33,7 +37,9 @@ warn() { printf "${YELLOW}[ warn ]${NC} %s\n" "$*" >&2; }
 err()  { printf "${RED}[ fail ]${NC} %s\n" "$*" >&2; }
 
 usage() {
-    sed -n '2,20p' "$0" | sed 's/^# //; s/^#//'
+    # Everything between the shebang and the first line of code, so the help can
+    # never drift from the flags the script actually accepts.
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
 }
 
 while [ $# -gt 0 ]; do
@@ -43,11 +49,34 @@ while [ $# -gt 0 ]; do
         --enforce) ENFORCE="enforce" ;;
         --monitor) ENFORCE="monitor" ;;
         --prefix)  PREFIX="$2"; shift ;;
+        --uninstall) UNINSTALL=true ;;
+        --purge)   PURGE=true ;;
+        --yes|-y)  YES=true ;;
         --help|-h) usage; exit 0 ;;
         *) err "Unknown flag: $1"; usage; exit 1 ;;
     esac
     shift
 done
+
+# ----- uninstall door --------------------------------------------------------
+# An operator whose network is misbehaving reads this command from a phone and
+# types one line, so --uninstall has to work before anything else: no mode
+# questions, no dependency checks, no clone. Hand it to the uninstaller in
+# whichever tree is present and pass the same flags through.
+if [ "${UNINSTALL:-false}" = true ]; then
+    for candidate in "$SCRIPT_DIR/install/uninstall.sh" "$PREFIX/install/uninstall.sh"; do
+        if [ -f "$candidate" ]; then
+            uninstall_args=(--prefix "$PREFIX")
+            [ "${PURGE:-false}" = true ] && uninstall_args+=(--purge)
+            [ "${YES:-false}" = true ] && uninstall_args+=(--yes)
+            log "Delegating to $candidate"
+            exec bash "$candidate" "${uninstall_args[@]}"
+        fi
+    done
+    err "install/uninstall.sh not found (looked in $SCRIPT_DIR and $PREFIX)."
+    err "Run it directly:  sudo bash <checkout>/install/uninstall.sh"
+    exit 1
+fi
 
 # ----- door choice -----
 if [ -z "$MODE" ]; then

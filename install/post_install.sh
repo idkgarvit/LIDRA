@@ -169,6 +169,30 @@ else
     ok "XDP program built."
 fi
 
+# ----- operator group + runtime dir -----
+# The agent runs as root (AF_PACKET/NFQUEUE) but the Unix socket that accepts
+# block/unblock is 0660 root:lidra, so operators attach the TUI without root.
+if ! getent group lidra >/dev/null 2>&1; then
+    groupadd -r lidra && ok "Created group 'lidra'."
+fi
+# Best-effort: the invoking sudo user gets TUI access without extra steps.
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    usermod -aG lidra "$SUDO_USER" 2>/dev/null \
+        && log "Added $SUDO_USER to group 'lidra' (log out/in to take effect)." || true
+fi
+if [ -d /run ]; then
+    mkdir -p /run/lidra && chown root:lidra /run/lidra && chmod 0750 /run/lidra \
+        && ok "Runtime dir /run/lidra ready (root:lidra 0750)." || true
+fi
+
+# ----- logrotate (was written but never installed — fix that) -----
+if [ -f "$SCRIPT_DIR/logrotate.conf" ] && [ -d /etc/logrotate.d ]; then
+    install -m 0644 "$SCRIPT_DIR/logrotate.conf" /etc/logrotate.d/lidra
+    ok "Logrotate config installed."
+else
+    warn "logrotate.d not found — logs under $LOG_DIR are not rotated. Monitor disk space."
+fi
+
 # ----- systemd unit -----
 if [ "${LIDRA_NO_SERVICE:-}" = "" ] && [ -f "$SERVICE_FILE_SRC" ] && [ -d /etc/systemd/system ]; then
     log "Installing systemd unit to $SERVICE_FILE_DST"
