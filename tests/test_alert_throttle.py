@@ -38,3 +38,33 @@ def test_cooldown_expiry_refires():
     assert t.allow("x", "y") is False
     time.sleep(1.1)
     assert t.allow("x", "y") is True
+
+
+def test_first_alert_fires_on_a_freshly_booted_machine(monkeypatch):
+    """Regression: the never-seen sentinel was 0, but time.monotonic() is
+    seconds-since-BOOT on Linux. For the first `cooldown` seconds of uptime,
+    ``now - 0 < cooldown``, so a genuinely first-ever alert was suppressed —
+    LIDRA was silent for the first 15 minutes after every reboot (and
+    LIDRADatabase, which reuses this class for record dedupe with a 60 s
+    cooldown, dropped attack rows for the first minute).
+
+    Simulated rather than slept: the bug only reproduces when uptime < cooldown,
+    which a long-running CI box never reaches.
+    """
+    monkeypatch.setattr(time, "monotonic", lambda: 5.0)
+    t = AlertThrottle(cooldown_seconds=900)
+    assert t.allow("syn_burst", "1.2.3.4") is True, (
+        "a first-ever alert was suppressed on a freshly booted machine"
+    )
+    # and the throttle still throttles
+    assert t.allow("syn_burst", "1.2.3.4") is False
+    assert t.allow("port_scan", "1.2.3.4") is True
+
+
+def test_zero_cooldown_always_fires(monkeypatch):
+    """A 0 s cooldown (used by tests and by callers that want no dedupe) must
+    never suppress the first sighting."""
+    monkeypatch.setattr(time, "monotonic", lambda: 1.0)
+    t = AlertThrottle(cooldown_seconds=0)
+    assert t.allow("a", "b") is True
+    assert t.allow("a", "b") is True

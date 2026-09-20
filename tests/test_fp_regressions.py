@@ -215,6 +215,10 @@ class TestLowEntropyISNFPFix:
 
     def test_identical_isns_flagged(self):
         fp = TCPFingerprinter()
+        # Corroboration first: a spoofed source's SYNs go unanswered.
+        for _ in range(4):
+            fp._track_handshakes(
+                {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "flags": "S"}, "S")
         for s in [100, 100, 100, 100, 100]:
             r = fp._check_isn_randomness("10.0.0.1", s, "S")
         assert r is not None
@@ -223,6 +227,9 @@ class TestLowEntropyISNFPFix:
 
     def test_predictable_counter_flagged(self):
         fp = TCPFingerprinter()
+        for _ in range(4):
+            fp._track_handshakes(
+                {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "flags": "S"}, "S")
         for s in [100, 200, 300, 400, 500]:  # constant +100
             r = fp._check_isn_randomness("10.0.0.1", s, "S")
         assert r is not None
@@ -230,6 +237,9 @@ class TestLowEntropyISNFPFix:
 
     def test_tight_counter_flagged(self):
         fp = TCPFingerprinter()
+        for _ in range(4):
+            fp._track_handshakes(
+                {"src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "flags": "S"}, "S")
         for s in [1000, 1050, 1100, 1150, 1200]:  # all <100 increments
             r = fp._check_isn_randomness("10.0.0.1", s, "S")
         assert r is not None
