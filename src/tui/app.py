@@ -108,8 +108,11 @@ class LocalProvider:
 
     def on_block(self, ip: str) -> None:
         if self._healthy():
-            self.agent.firewall.block_ip(ip, ttl_seconds=3600)
-            self._data_provider.block_ip(ip, "manual")
+            # Only record the block if the firewall accepted it: a refusal
+            # (own address / gateway / resolver) must not appear in the block
+            # list as though a rule existed.
+            if self.agent.firewall.block_ip(ip, ttl_seconds=3600):
+                self._data_provider.block_ip(ip, "manual")
 
     def on_unblock(self, ip: str) -> None:
         if self._healthy():

@@ -838,10 +838,29 @@ class InlineEngine:
                 except Exception as e:
                     logger.warning(f"[InlineEngine] Detection callback error: {e}")
 
-    def _parse_packet(self, raw_data: bytes) -> Optional[Dict]:
+    def _parse_packet(self, raw_data: bytes, capture_ts: float = None) -> Optional[Dict]:
+        """Parse a raw frame into the pipeline's packet dict.
+
+        ``capture_ts`` is the time the frame was *observed* (pcap timestamp, or
+        the live arrival time). Three timing detectors — slow_loris,
+        short_connection and the inter-arrival checks — previously read
+        ``time.time()`` themselves, which measures **when the pipeline ran**,
+        not when the traffic happened. On a pcap replay that means CPU speed: the
+        bundled benign capture spans 0.095 s of real time, so every connection
+        looked like a sub-500 ms scan and ordinary browsing was reported as
+        `slow_loris` and `short_connection`. Under a capture backlog the live
+        path has the same defect in reverse. Passing the observation time
+        through keeps those detectors measuring the network.
+        """
         if not raw_data or len(raw_data) < 14:
             return None
 
+        packet = self._parse_packet_inner(raw_data)
+        if packet is not None and capture_ts is not None:
+            packet.setdefault("capture_ts", capture_ts)
+        return packet
+
+    def _parse_packet_inner(self, raw_data: bytes) -> Optional[Dict]:
         # ponytail: forensics window fills here — the one choke point every
         # capture source flows through. Framing mirrors the eth check below.
         is_eth = raw_data[12:14] in (b"\x08\x00", b"\x86\xdd") and self._inner_ip_ok(raw_data)

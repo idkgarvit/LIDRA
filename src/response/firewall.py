@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 
 _IPV4_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
+# Tag carried by every NFQUEUE rule LIDRA owns. Without it the only handle on
+# the rule was its queue number, so teardown — and install/uninstall.sh — had to
+# match on the queue number alone, which would also delete an unrelated tool's
+# rule that happened to use the same queue. (The uninstaller went further and
+# offered to delete *every* NFQUEUE rule in INPUT on that basis.) Matching a
+# comment we own makes "remove exactly our rules" possible.
+LIDRA_NFQUEUE_COMMENT = "lidra_nfqueue"
+
 
 def _validate_ip(ip: str) -> str:
     """Validate and normalize an IP address. Raises ValueError on bad input."""
@@ -29,6 +37,33 @@ def _validate_ip(ip: str) -> str:
     if addr.is_loopback:
         raise ValueError(f"Refusing to block loopback: {ip}")
     return str(addr)
+
+
+def _protected_ips() -> frozenset:
+    """Addresses that must never be blocked (own, gateway, resolvers).
+
+    Imported lazily and swallowed on failure: this module has to stay
+    importable in stripped-down contexts (the bridge container), and a failure
+    to determine the protected set must not stop the firewall doing its job —
+    it degrades to the pre-F4 behaviour and logs at debug level.
+    """
+    try:
+        from utils.interface import protected_ips
+        return protected_ips()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("[Firewall] protected-IP set unavailable: %s", e)
+        return frozenset()
+
+
+def is_protected(ip: str) -> bool:
+    """True if blocking ``ip`` would cut this host off its own network.
+
+    Public so the CLI and TUI can explain the refusal instead of reporting a
+    generic "failed to block".
+    """
+    if not isinstance(ip, str) or not ip:
+        return False
+    return ip in _protected_ips()
 
 
 class FirewallManager:
@@ -104,12 +139,30 @@ class FirewallManager:
             ["which", "nft"], capture_output=True, check=False
         ).returncode == 0
 
+    def is_protected_ip(self, ip: str) -> bool:
+        """True if blocking ``ip`` would take this host off its own network."""
+        return is_protected(ip)
+
     def block_ip(self, ip: str, ttl_seconds: int = 3600) -> bool:
-        """Block an IP address. Idempotent — duplicate calls are no-ops."""
+        """Block an IP address. Idempotent — duplicate calls are no-ops.
+
+        Refuses to block this host's own address, its default gateway or its
+        resolver. That is a self-inflicted outage rather than a response, and
+        it is the failure mode that makes an operator uninstall an IDS and
+        never come back (F4, docs/PRODUCTION_READINESS.md). Checked before the
+        dry-run branch so dry-run and live agree on what is blockable.
+        """
         try:
             ip = _validate_ip(ip)
         except ValueError as e:
             logger.error(f"Refusing to block invalid IP: {e}")
+            return False
+        if is_protected(ip):
+            logger.error(
+                "[Firewall] Refusing to block %s: it is this host's own address, "
+                "default gateway or DNS resolver. Blocking it would cut the "
+                "network LIDRA is defending.", ip,
+            )
             return False
         if self.dry_run:
             logger.info(f"[DRY-RUN] Would block {ip} for {ttl_seconds}s")
@@ -347,6 +400,14 @@ class FirewallManager:
         if ip in own_ips:
             logger.warning(f"[Firewall] Refusing to bridge-block own IP {ip}")
             return
+        # The gateway/resolver guard is process-wide, not per-call: a bridge
+        # that drops its own next hop goes dark just as thoroughly as a host.
+        if is_protected(ip):
+            logger.warning(
+                f"[Firewall] Refusing to bridge-block protected IP {ip} "
+                "(own address, gateway or DNS resolver)"
+            )
+            return
         if self.dry_run:
             logger.info(f"[DRY-RUN] Would add bridge drop rule for {ip}")
             return
@@ -402,6 +463,7 @@ class FirewallManager:
                     "iptables", "-I", "INPUT",
                     "-p", "tcp",
                     "-m", "state", "--state", "NEW,ESTABLISHED",
+                    "-m", "comment", "--comment", LIDRA_NFQUEUE_COMMENT,
                     "-j", "NFQUEUE", "--queue-num", str(queue_num), "--queue-bypass"
                 ],
                 check=True, capture_output=True
@@ -423,23 +485,41 @@ class FirewallManager:
         logger.info("[Firewall] INPUT NFQUEUE rules cleaned")
 
     def _flush_local_nfqueue(self, queue_num: int = 0):
-        """Remove ALL NFQUEUE rules for this queue_num from INPUT (including orphaned manual ones)."""
+        """Remove LIDRA's own NFQUEUE rules from INPUT.
+
+        Matches on the ``lidra_nfqueue`` comment tag. If no tagged rules exist —
+        an install from before the tag was added — it falls back to the queue
+        number, which is the only handle older versions left. The fallback is
+        skipped entirely once a tagged rule is seen, so a rule LIDRA cannot
+        prove it owns in the same queue is never touched.
+        """
         try:
             result = subprocess.run(
                 ["iptables", "-L", "INPUT", "--line-numbers", "-n"],
                 capture_output=True, text=True, check=False, timeout=10
             )
-            # Walk in reverse so line numbers stay valid after each delete
             lines = result.stdout.split("\n")
-            for i in range(len(lines) - 1, -1, -1):
-                line = lines[i]
-                if f"NFQUEUE num {queue_num}" in line or f"nfqueue queue:{queue_num}" in line:
-                    line_num = line.split()[0]
-                    if line_num.isdigit():
-                        subprocess.run(
-                            ["iptables", "-D", "INPUT", line_num],
-                            check=False, capture_output=True, timeout=5
-                        )
+            tagged = [ln for ln in lines if LIDRA_NFQUEUE_COMMENT in ln]
+            if tagged:
+                targets = tagged
+            else:
+                targets = [
+                    ln for ln in lines
+                    if f"NFQUEUE num {queue_num}" in ln or f"nfqueue queue:{queue_num}" in ln
+                ]
+
+            # Descending line numbers: each delete renumbers the ones below it.
+            line_nums = sorted(
+                (int(ln.split()[0]) for ln in targets if ln.split() and ln.split()[0].isdigit()),
+                reverse=True,
+            )
+            for line_num in line_nums:
+                subprocess.run(
+                    ["iptables", "-D", "INPUT", str(line_num)],
+                    check=False, capture_output=True, timeout=5
+                )
+            if line_nums:
+                logger.info(f"[Firewall] Removed {len(line_nums)} LIDRA NFQUEUE rule(s) from INPUT")
         except Exception as e:
             logger.warning(f"[Firewall] Failed to flush NFQUEUE rules for queue {queue_num}: {e}")
 
