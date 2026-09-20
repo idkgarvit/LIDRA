@@ -24,8 +24,10 @@ Opt-in for the 30MB pcap: `RUN_SLOW_PCAPS=1 python3 -m pytest tests/test_attack_
 | **SQLi** | loopback `OR '1'='1` (1 pkt) | Student corpus | ✅ | `sql_injection` | **Fixed by HTTP parser URI-preservation** |
 | **SQLi** | loopback stacked (1 pkt) | Student corpus | ✅ | `sql_injection` | Same fix |
 | **RCE** | Apache Shiro CVE-2016-4437 (781 pkts) | ExploitPcapCollection | ⚠️ partial | `cookie_injection` (16x), `session_correlated_cmd_attack` (2x) | Detected, but no specific `shiro_deserialization` signature |
-| **Benign** | Normal DNS (5K pkts) | DNS-tunnel corpus | — | `ipv6_tunnel` (314x), `command_injection` (40x) | **FP: 7.3%** (was 90%) |
-| **Benign** | Normal web (1.2K pkts) | scapy-generated | — | `low_entropy_isn` (71x), `session_correlated_sql_attack` (18x) | **FP: 7.75%** (was 76%) |
+| **Benign** | Normal DNS (5K pkts) | DNS-tunnel corpus | — | `dns_tunnel` 2, `session_correlated_cmd_attack` 2, `session_correlated_sql_attack` 2 | **FP: 0.12%** (6/4956) — was 7.3% |
+| **Benign** | Normal web (1.2K pkts) | scapy-generated | — | none | **FP: 0.00%** (0/1200) — was 7.75%, then 3.83%, **now zero** after the §3.3 detector fixes |
+| **Benign** | Normal HTTPS / TLS (60 pkts) | dpkt-generated (`_generate_tls_pcaps.py`) | — | `tls_fingerprint` **observation** only (12x, severity `info`) | **0 actionable.** Added 2026-09-18: this category had **no TLS capture at all**, which is how the `info` row leak stayed invisible. See `docs/PRODUCTION_READINESS.md` §0.1.1. |
+| **TLS C2** | Tool-like ClientHello (4 pkts) | dpkt-generated (`_generate_tls_pcaps.py`) | ✅ | `malicious_tls_fingerprint` (severity high) | T7 fixture. **The JA4 match is synthetic** — a published hash cannot be matched (48-bit truncated-sha256 preimage); the test adds the crafted hash to its own blocklist. `config/config.yaml` is untouched. |
 
 ## Summary
 

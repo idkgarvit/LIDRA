@@ -1,0 +1,37 @@
+name: Malicious TLS ClientHello (tool-like shape, synthetic JA4 match)
+source: generated locally with dpkt by tests/attack_pcap/_generate_tls_pcaps.py
+description: One ClientHello with a sparse, C2-beacon-like shape (single TLS1.3 suite, no SNI)
+attack_category: tls_c2
+mitre: T1572
+severity: high
+expected_attack_types:
+  - malicious_tls_fingerprint
+expected_min_confidence: 0.9
+expected_min_packets_with_detection: 1
+notes: |
+  4 packets (3-way handshake + ClientHello). T7's fixture.
+
+  ## THE MATCH IS SYNTHETIC — read this before "fixing" the fixture
+
+  A JA4's `b` and `c` components are sha256(...)[:12] — 48 bits each. Matching
+  one of the 9 published hashes in `config/config.yaml` would need an infeasible
+  ~2^48 preimage search, so a ClientHello cannot be crafted from a published
+  hash. The direction is reversed instead: this hello is crafted, its JA4 is
+  computed, and the *test* adds that hash to its own blocklist for the duration
+  of the run.
+
+  That exercises the real path — DPI detection, `decide_verdict()` returning
+  DROP, the agent persisting and alerting — while making no claim to be real
+  malware traffic. `config/config.yaml` is never modified.
+
+  JA4 of the hello in this capture:
+    t13i010200_0f2cb44170f4_fdaab033dba4
+
+  ## The JA4 trap that makes this look broken
+
+  `TLSFingerprinter.__init__` calls `_load_ja4_db()`, which **rebinds**
+  `_KNOWN_MALICIOUS_JA4` from config. Patch the blocklist *then* build the
+  engine and the constructor wipes the patch — everything looks benign, and you
+  conclude (wrongly) that JA4 can never fire. Build the engine FIRST, patch
+  SECOND, then feed the packet. See `tests/test_observation_severity.py::
+  TestMaliciousTlsCaptureAlerts` and docs/PRODUCTION_READINESS.md §0.1.1.

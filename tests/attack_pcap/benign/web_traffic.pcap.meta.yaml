@@ -5,21 +5,34 @@ attack_category: benign
 mitre: null
 severity: info
 expected_attack_types: []
-expected_max_false_positives: 150
-fp_rate_baseline: 0.08
+expected_max_false_positives: 5
+fp_rate_baseline: 0.0
 notes: |
   Small but representative. 1200 packets of normal HTTP traffic.
   Used as the "this is what normal looks like" baseline.
 
   FP history:
-    - 93 flagged (7.75%) originally
-    - dominated by low_entropy_isn (71x) — the synthetic ISNs happen to
-      land within the detector's "consecutive ISNs are spoofed" band; real
-      networks show more entropy — plus session_correlated_sql_attack (18x)
-      on what look like base64 CDN responses.
-    - The packet count did not change materially after the alert gate
-      (only ~1 packet was architecturally suppressed); was never the
-      dominant noise source here.
+    - 93 flagged (7.75%) originally — dominated by low_entropy_isn (71x).
+    - 46 flagged (3.83%) after the alert gate.
+    - **0 flagged (0.00%) after the §3.3 detector fixes (2026-09-19).** Four
+      real defects were found by diagnosis, not by widening a severity filter:
+        * low_entropy_isn (24x) fired on *zero ISNs*. Most pcap writers emit
+          seq=0, so "all ISNs identical" distinguished nothing. It now needs a
+          non-zero sample plus unanswered SYNs.
+        * session_correlated_sql_attack (18x) fired because the SQL pattern's
+          comment token `/*` matched `Accept: */*` — every ordinary GET.
+        * short_connection (2x) measured connection duration with time.time(),
+          i.e. replay speed; every connection here spans ~0.0003 s of capture
+          time. It now uses the capture clock and requires dropped connections.
+        * slow_loris (2x) fired at 136 SYN/s without checking that the
+          connections *complete* (100% do here).
+      See tests/test_false_positive_fixes.py — each fix is pinned in both
+      directions, so the attacks these detectors exist for still fire.
 
-  Threshold of 150 catches regression. Tracked as remaining tuning debt
-  in COVERAGE.md.
+  Budget of 5 catches regression while allowing small detector changes to
+  land without touching this file for one or two packets. Was 150 when the
+  measured rate was 3.8%; a budget that loose could not fail.
+
+  `expected_max_false_positives` counts ACTIONABLE detections only. A packet
+  carrying a severity-"info" observation (e.g. a TLS JA4 note) is not a false
+  positive — see docs/PRODUCTION_READINESS.md §0.1.1.

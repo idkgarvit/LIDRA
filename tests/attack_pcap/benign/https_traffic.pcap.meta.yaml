@@ -1,0 +1,33 @@
+name: Benign HTTPS traffic (TLS ClientHellos)
+source: generated locally with dpkt by tests/attack_pcap/_generate_tls_pcaps.py
+description: 12 ordinary HTTPS conversations from 12 distinct clients, Chromium-like ClientHellos with SNI
+attack_category: benign
+mitre: null
+severity: info
+expected_attack_types: []
+expected_min_confidence: 0.0
+expected_max_false_positives: 0
+expected_max_attack_rows: 0
+notes: |
+  60 packets. Exists because the corpus previously contained **no TLS capture
+  at all** — `clean.pcap` and `web_traffic.pcap` both hold zero TCP/443 packets.
+  That gap is why the observation-severity leak
+  (docs/PRODUCTION_READINESS.md §0.1.1) went unnoticed: ordinary HTTPS produced
+  an `info`-severity `tls_fingerprint` detection per parseable ClientHello, and
+  the row write sat above the alert/block gate, so `attackers`/`attacks` grew
+  with normal browsing.
+
+  EXPECTATION — this is the load-bearing assertion:
+    * attack rows: 0        (severity "info" is an observation, not an attack)
+    * alerts:      0
+    * blocks:      0
+    * the DPI layer SHOULD still report `tls_fingerprint` at severity `info`.
+      Do not "fix" a failure here by deleting the observation.
+
+  Pinned by tests/test_observation_severity.py (both directions: this capture
+  must stay silent, and the malicious fixture must still alert).
+
+  JA4 of the hello in this capture (one instance):
+    t13d080500_159b5621a6ca_f49e00e6288d
+  It is deliberately NOT added to config/config.yaml — that list ships curated
+  real-world hashes and a generated one does not belong in it.

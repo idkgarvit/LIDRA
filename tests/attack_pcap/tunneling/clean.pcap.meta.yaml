@@ -6,8 +6,8 @@ mitre: null
 severity: info
 expected_attack_types: []     # Must be empty — no FP allowed
 expected_min_confidence: 0.0
-expected_max_false_positives: 20
-fp_rate_baseline: 0.003
+expected_max_false_positives: 8
+fp_rate_baseline: 0.0012
 notes: |
   1MB of normal DNS traffic.
 

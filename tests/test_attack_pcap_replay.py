@@ -37,6 +37,7 @@ SRC = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from bridge.inline_engine import InlineEngine  # noqa: E402
+from utils.severity import is_actionable_severity  # noqa: E402
 
 ATTACK_PCAP_DIR = PROJECT_ROOT / "tests" / "attack_pcap"
 
@@ -82,30 +83,52 @@ def _make_engine() -> InlineEngine:
 
 
 def _run_pcap(pcap_path: Path) -> Dict:
-    """Replay a pcap through the engine; return aggregate detection stats."""
+    """Replay a pcap through the engine; return aggregate detection stats.
+
+    Two counts, deliberately distinct (see docs/PRODUCTION_READINESS.md §0.1.1):
+
+    * ``packets_with_detection`` — EVERY packet where an analyzer fired. This is
+      coverage: did the pipeline see the traffic at all?
+    * ``packets_with_actionable_detection`` — packets where a non-``info``
+      detection fired. This is what the benign false-positive budget is measured
+      against, because severity ``info`` is an observation, not an accusation
+      (today: the TLS JA4 passthrough, which reports one for any ClientHello).
+      Counting an observation as a false positive would make the benign budget
+      unsatisfiable on any TLS traffic and would push someone to silence the
+      observation instead of tuning a detector.
+    """
     engine = _make_engine()
     detections_by_type: Dict[str, int] = {}
     detections_by_source: Dict[str, int] = {}
     total_packets = 0
     parsed_packets = 0
     packets_with_detection = 0
+    packets_with_actionable_detection = 0
+    observations_by_type: Dict[str, int] = {}
     start = time.time()
 
     for _ts, buf in _read_packets(pcap_path):
         total_packets += 1
-        packet = engine._parse_packet(buf)
+        packet = engine._parse_packet(buf, capture_ts=_ts)
         if not packet:
             continue
         parsed_packets += 1
         detections = engine._run_detection_pipeline(packet)
         if detections:
             packets_with_detection += 1
+            actionable = False
             for d in detections:
                 atype = d.get("attack_type", "unknown")
                 detections_by_type[atype] = detections_by_type.get(atype, 0) + 1
                 src = d.get("source_ip", "")
                 if src:
                     detections_by_source[src] = detections_by_source.get(src, 0) + 1
+                if is_actionable_severity(d.get("severity", "medium")):
+                    actionable = True
+                else:
+                    observations_by_type[atype] = observations_by_type.get(atype, 0) + 1
+            if actionable:
+                packets_with_actionable_detection += 1
 
     elapsed = time.time() - start
     return {
@@ -113,6 +136,8 @@ def _run_pcap(pcap_path: Path) -> Dict:
         "total_packets": total_packets,
         "parsed_packets": parsed_packets,
         "packets_with_detection": packets_with_detection,
+        "packets_with_actionable_detection": packets_with_actionable_detection,
+        "observations_by_type": observations_by_type,
         "detection_types": detections_by_type,
         "top_sources": sorted(
             detections_by_source.items(), key=lambda kv: -kv[1]
@@ -160,6 +185,8 @@ def test_pcap_replay(pcap_path, meta_path, capsys):
         f"  packets:        {result['total_packets']} total, "
         f"{result['parsed_packets']} parsed",
         f"  packets w/det:  {result['packets_with_detection']}",
+        f"  actionable:     {result['packets_with_actionable_detection']}"
+        f"  (observations: {result['observations_by_type']})",
         f"  detection types: {result['detection_types']}",
         f"  top sources:    {result['top_sources']}",
         f"  elapsed:        {result['elapsed_sec']}s",
@@ -170,9 +197,10 @@ def test_pcap_replay(pcap_path, meta_path, capsys):
     min_conf = float(meta.get("expected_min_confidence", 0.0))
     min_packets = int(meta.get("expected_min_packets_with_detection", 0))
     max_fp = int(meta.get("expected_max_false_positives", 0))
-    # A packet is "false positive" if it had ANY detection.
-    # Detection type counts can be > 1 per packet.
-    fp_count = result["packets_with_detection"]
+    # A packet is a "false positive" if it raised an ACTIONABLE detection.
+    # severity "info" is an observation, not an accusation — see _run_pcap
+    # and docs/PRODUCTION_READINESS.md §0.1.1.
+    fp_count = result["packets_with_actionable_detection"]
 
     if is_benign:
         with capsys.disabled():
