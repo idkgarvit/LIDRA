@@ -25,6 +25,7 @@ from intel.virustotal import VirusTotalProvider
 from alerts.notifier import Alert, AlertNotifier
 from alerts.slack import SlackChannel
 from alerts.discord import DiscordChannel
+from alerts.email_alert import EmailChannel
 from response.firewall import FirewallManager
 from detection.attack_detector import AttackDetector
 from detection.mitre import MITREMapper
@@ -147,6 +148,33 @@ class LIDRACore(ABC):
         if discord:
             channels.append(DiscordChannel(discord))
 
+        # SMTP. `config/config.yaml` has always documented an `alerts.email`
+        # block (enabled / smtp_host / smtp_port / username / password /
+        # from_addr / to_addrs) but nothing read it, so the documented email
+        # channel could never be used — see docs/PRODUCTION_READINESS.md §2.5.
+        # The password resolves through utils.paths.resolve_secret so it can come
+        # from LIDRA_SMTP_PASSWORD rather than the config file.
+        email = alerts_cfg.get('email', {}) or {}
+        if email.get('enabled') and email.get('smtp_host'):
+            to_addrs = email.get('to_addrs') or []
+            if isinstance(to_addrs, str):
+                to_addrs = [a.strip() for a in to_addrs.split(',') if a.strip()]
+            if to_addrs:
+                try:
+                    from utils.paths import resolve_secret
+                    password = resolve_secret(
+                        "smtp", "password", email.get('password', '')) or ""
+                except Exception as e:  # config/secrets must never block startup
+                    logger.warning(f"[Alerts] could not resolve SMTP password: {e}")
+                    password = email.get('password', '') or ""
+                channels.append(EmailChannel(
+                    smtp_host=email.get('smtp_host', ''),
+                    smtp_port=int(email.get('smtp_port', 587)),
+                    username=email.get('username', ''),
+                    password=password,
+                    from_addr=email.get('from_addr', ''),
+                    to_addrs=to_addrs,
+                ))
         return AlertNotifier(channels)
 
     def _ensure_nfqueue_module(self) -> bool:
