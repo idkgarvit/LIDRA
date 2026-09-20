@@ -18,7 +18,15 @@ class AlertThrottle:
         """True if an alert for this key may fire now (records the firing)."""
         now = time.monotonic()
         key = f"{attack_type}:{ip}"
-        if now - self._last.get(key, 0) < self.cooldown:
+        # ponytail: `self._last.get(key, 0)` used 0 as the never-seen sentinel,
+        # but time.monotonic() is seconds-since-BOOT on Linux. For the first
+        # `cooldown` seconds of uptime, `now - 0 = uptime < cooldown`, so a
+        # genuinely first-ever alert was suppressed — no alert at all for the
+        # first 15 minutes after boot (and no attack row for the first 60 s,
+        # since LIDRADatabase reuses this for record dedupe). None is the
+        # sentinel now; it cannot collide with a real monotonic value.
+        last = self._last.get(key)
+        if last is not None and now - last < self.cooldown:
             return False
         if len(self._last) >= self.max_keys:
             # ponytail: dict prune, not LRU — unbounded growth is the only

@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-LIDRA v3 - eBPF-Powered Detection System
+LIDRA - Intrusion Detection & Response Agent
 
-Lightweight, enterprise-grade intrusion detection using:
-- eBPF kernel-level telemetry (with log fallback)
+Lightweight, same-host and inline intrusion detection using:
+- Packet capture (AF_PACKET / NFQUEUE) and auth-log correlation
+- eBPF kernel telemetry where the kernel and bcc allow it, with a
+  log-based fallback otherwise
 - MITRE ATT&CK mapped detections
-- Statistical ML anomaly detection  
-- LLM-powered explanations
+- Statistical anomaly detection (per-IP baselines, behavioural analysis)
 - SIEM-compatible output
+
+Not claimed: LLM triage (soar/) and the XDP data path exist in the tree but
+are not wired into this agent — see docs/PRODUCTION_READINESS.md section 3.
 """
 
 import os
@@ -30,6 +34,7 @@ from ebpf import EBPFDetector
 from collectors.network import create_sniffer
 from collectors.syslog import create_syslog_server
 from utils.interface import detect_interface
+from utils.severity import is_actionable_severity
 from core.agent_base import LIDRACore
 
 try:
@@ -191,6 +196,13 @@ class _LegacyMonitorAgent(LIDRACore):
             source_ip = detection.get('source_ip', 'unknown')
             if source_ip == 'unknown':
                 return
+            # Mirrors core/agent_base: the row write sits above the
+            # alert/block gate, so an observation-severity detection would
+            # otherwise persist without ever being actionable. No detector on
+            # this path emits "info" today — this keeps the invariant true by
+            # construction rather than by accident.
+            if not is_actionable_severity(severity):
+                return
             whitelist = self.config.get('whitelist', [])
             if source_ip in whitelist:
                 return
@@ -232,7 +244,7 @@ class _LegacyMonitorAgent(LIDRACore):
                 self._detect_honeypot_events()
                 time.sleep(sleep_time)
         except KeyboardInterrupt:
-            logger.info("LIDRA v3 monitor mode stopped by user")
+            logger.info("LIDRA monitor mode stopped by user")
         finally:
             self.stop()
 
@@ -240,7 +252,7 @@ class _LegacyMonitorAgent(LIDRACore):
 def main():
     """Entry point with signal handling and PID file."""
     import argparse
-    parser = argparse.ArgumentParser(description="LIDRA v3 — eBPF-Powered Detection System")
+    parser = argparse.ArgumentParser(description="LIDRA — Intrusion Detection & Response Agent")
     parser.add_argument("--demo", action="store_true", help="Auto-fire synthetic demo attacks into the TUI")
     parser.add_argument("--mode", choices=["laptop", "gateway"], default=None, help="Override config mode")
     parser.add_argument("--tui", dest="tui", action="store_true", default=None, help="Launch the TUI")

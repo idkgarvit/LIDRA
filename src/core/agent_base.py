@@ -17,6 +17,7 @@ from typing import Dict, Optional
 import psutil
 
 from utils.paths import get_lidra_root
+from utils.severity import is_actionable_severity
 from database.db import LIDRADatabase
 from intel.threat_intel import ThreatIntelOrchestrator
 from intel.abuseipdb import AbuseIPDBProvider
@@ -30,6 +31,8 @@ from detection.mitre import MITREMapper
 from detection.explainer import AttackExplainer
 
 BASE = Path(__file__).resolve().parent.parent
+
+logger = logging.getLogger("LIDRA-core")
 
 
 def _config_dry_run(config: dict) -> bool:
@@ -136,12 +139,14 @@ class LIDRACore(ABC):
 
     def _init_alerting(self) -> AlertNotifier:
         channels = []
-        slack = self.config.get('alerts', {}).get('slack_webhook', '')
-        discord = self.config.get('alerts', {}).get('discord_webhook', '')
+        alerts_cfg = self.config.get('alerts', {})
+        slack = alerts_cfg.get('slack_webhook', '')
+        discord = alerts_cfg.get('discord_webhook', '')
         if slack:
             channels.append(SlackChannel(slack))
         if discord:
             channels.append(DiscordChannel(discord))
+
         return AlertNotifier(channels)
 
     def _ensure_nfqueue_module(self) -> bool:
@@ -179,6 +184,11 @@ class LIDRACore(ABC):
                     snapshot_fn=self.tui_data_provider.get_snapshot,
                     block_fn=block_fn,
                     unblock_fn=unblock_fn,
+                    # The socket accepts block/unblock from any user in the
+                    # `lidra` group, so the action has to be attributable —
+                    # the server resolves the peer uid from the kernel and
+                    # writes the row here (plan section 5.9).
+                    audit_fn=self.db.log_audit,
                 )
                 ipc.start()
                 self._tui_ipc_server = ipc
@@ -241,6 +251,29 @@ class LIDRACore(ABC):
             details = detection.get("details", "")
 
             if not source_ip:
+                return
+
+            # ─ Observations are not attacks ───────────────────────────────
+            # severity "info" is a factual observation about traffic (today:
+            # the TLS JA4 passthrough in dpi_engine, which emits one for ANY
+            # parseable ClientHello). It must not create attacker/attacks rows,
+            # must not alert and must not block — otherwise ordinary HTTPS grows
+            # the attackers table forever and `lidra status` becomes noise.
+            #
+            # This is the choke point rather than the DB layer: it is the one
+            # place that feeds all three effects (row, alert, block), and the
+            # policy of what counts as an attack belongs to the agent, not to
+            # SQLite. The detection itself is NOT dropped — the DPI layer still
+            # returns it and the engine already counted it in Prometheus
+            # (`_apply_verdict`); it is only excluded from response/persistence.
+            if not is_actionable_severity(severity):
+                self._push_tui_event({"type": "observation", "data": {
+                    "ip": source_ip,
+                    "type": attack_type,
+                    "severity": severity,
+                    "details": details,
+                    "timestamp": datetime.now().isoformat(),
+                }})
                 return
 
             whitelist = self.config.get('whitelist', [])
@@ -321,6 +354,19 @@ class LIDRACore(ABC):
 
             attack_type = detection.get('attack_type', 'unknown')
             severity = detection.get('severity', 'medium')
+
+            # Same invariant as _handle_detection_event: an observation-severity
+            # detection is reported, never persisted or acted upon. The row
+            # write below sits above this path's own high/critical gate, so
+            # without this an "info" detection would persist unalerted.
+            if not is_actionable_severity(severity):
+                self._push_tui_event({"type": "observation", "data": {
+                    "ip": getattr(event, 'dst_ip', '') or 'unknown',
+                    "type": attack_type,
+                    "severity": severity,
+                    "timestamp": datetime.now().isoformat(),
+                }})
+                return
 
             ip_address = getattr(event, 'dst_ip', '') or getattr(event, 'ip_address', '') or 'unknown'
 
