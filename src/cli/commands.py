@@ -22,26 +22,61 @@ from rich import box
 logger = logging.getLogger(__name__)
 console = Console()
 
+# Single source of truth: utils/version.py.
+try:
+    from utils.version import version_string as _version_string
+    VERSION: str = _version_string()
+except Exception:  # pragma: no cover - CLI can load without src/ on sys.path
+    VERSION = "v0.0.0"
+
 BASE_DIR = Path(__file__).parent.parent.parent
 LOG_FILE = BASE_DIR / "logs" / "lidra_v3.log"
 
 
-def _open_db():
-    """Open the agent's SQLite DB, or None (with a message) if unavailable."""
+def _actor() -> str:
+    """Who is running this command — the human behind sudo, not "root"."""
+    from utils.actor import current_actor
+    return current_actor()
+
+
+def _audit(action: str, target: str, detail: str = "", source: str = "cli") -> None:
+    """Best-effort audit write — never fails the command that triggered it.
+
+    Goes through ``_open_db`` (quietly) so there is exactly one place that
+    decides which database this process talks to, and returns silently when
+    there is no database yet.
+    """
+    try:
+        db = _open_db(quiet=True)
+        if db is not None:
+            db.log_audit(_actor(), action, target, detail, source)
+    except Exception as e:
+        logger.warning("[CLI] audit write failed for %s %s: %s", action, target, e)
+
+
+def _open_db(quiet: bool = False):
+    """Open the agent's SQLite DB, or None if unavailable.
+
+    ``quiet`` suppresses the console hint — used by the audit writer, which
+    must never add output to the command it is recording.
+    """
     try:
         from cli.doctor_cmd import _resolve_db_path
         from database.db import LIDRADatabase
     except ImportError as e:
-        console.print(f"[red]Cannot load DB layer: {e}[/red]")
+        if not quiet:
+            console.print(f"[red]Cannot load DB layer: {e}[/red]")
         return None
     try:
         db_path = _resolve_db_path()
         if not db_path.exists():
-            console.print(f"[yellow]No database yet at {db_path} (agent hasn't run?)[/yellow]")
+            if not quiet:
+                console.print(f"[yellow]No database yet at {db_path} (agent hasn't run?)[/yellow]")
             return None
         return LIDRADatabase(str(db_path))
     except Exception as e:
-        console.print(f"[red]Cannot open database: {e}[/red]")
+        if not quiet:
+            console.print(f"[red]Cannot open database: {e}[/red]")
         return None
 
 
@@ -73,28 +108,111 @@ def _active_blocks(db) -> list:
 
 
 def cmd_status(args: List[str]) -> bool:
-    """Show quick system status from the local DB."""
+    """Single health answer: version, agent, queue rule, DB.
+
+    This is the one command support asks for first, so it reads everything:
+    binary version, IPC socket (daemon alive?), the kernel queue rule state,
+    DB size and the last alert. Anything wrong makes the verdict DEGRADED.
+    """
+    from utils.version import __version__
     db = _open_db()
-    if db is None:
-        return False
-    stats = db.get_attacker_stats()
-    n_blocks = len(_active_blocks(db))
+    try:
+        from utils.runtime import find_socket
+        socket_path = find_socket()
+    except Exception:
+        socket_path = None
+
+    lines = [f"[bold]LIDRA {__version__}[/bold]"]
+    degraded = []
+
+    if socket_path:
+        lines.append(f"[green]agent:[/green] live (ipc: {socket_path})")
+    else:
+        lines.append("[yellow]agent:[/yellow] not running, or no IPC socket - "
+                     "the TUI would show mock data. Start the agent first.")
+        degraded.append("agent down")
+
+    queue_state = _queue_rule_state()
+    lines.append(f"queue rule: {queue_state}")
+    if "WITHOUT bypass" in queue_state:
+        degraded.append("queue rule without bypass")
+
+    if db is not None:
+        try:
+            stats = db.get_attacker_stats()
+            alerts = db.get_recent_alerts(1)
+            last = alerts[0] if alerts else None
+            n_blocks = len(_active_blocks(db))
+            size = _db_size_mb(db)
+            lines.append(
+                f"[cyan]attackers:[/cyan] {stats.get('total_attackers', 0)}  |  "
+                f"[orange]attacks (24h):[/orange] {stats.get('attacks_24h', 0)}  |  "
+                f"[red]active blocks:[/red] {n_blocks}  |  "
+                f"[dim]db: {size}[/dim]"
+            )
+            if last:
+                lines.append(
+                    f"last alert: {last.get('severity', '?')} "
+                    f"{last.get('alert_type', '?')} from {last.get('ip_address', '?')} "
+                    f"at {str(last.get('created_at', '-'))[:19]}"
+                )
+            else:
+                lines.append("last alert: none recorded")
+        except Exception as e:
+            lines.append(f"[red]db error:[/red] {e}")
+            degraded.append("db unreadable")
+    else:
+        degraded.append("no database")
 
     cpu = psutil.cpu_percent(interval=0.5)
     memory = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
-
-    console.print(Panel(
-        f"[cyan]Attackers:[/cyan] {stats.get('total_attackers', 0)}  |  "
-        f"[orange]Attacks (24h):[/orange] {stats.get('attacks_24h', 0)}  |  "
-        f"[red]Active Blocks:[/red] {n_blocks}\n"
+    lines.append(
         f"[blue]CPU:[/blue] {cpu:.1f}%  |  "
         f"[green]Memory:[/green] {memory.percent:.1f}%  |  "
-        f"[yellow]Disk:[/yellow] {disk.percent:.1f}%",
-        title="[bold]System Status[/bold]",
+        f"[yellow]Disk:[/yellow] {disk.percent:.1f}%"
+    )
+
+    verdict = "[green]OK[/green]" if not degraded else "[red]DEGRADED:[/red] " + ", ".join(degraded)
+    console.print(Panel(
+        "\n".join(lines),
+        title=f"[bold]System Status - {verdict}[/bold]",
         box=box.DOUBLE
     ))
-    return True
+    return not degraded
+
+
+def _queue_rule_state() -> str:
+    """Describe LIDRA's kernel queue rule the way the operator needs it."""
+    try:
+        result = subprocess.run(
+            ["nft", "list", "tables"], capture_output=True, text=True, timeout=5,
+        )
+        tables = (result.stdout or "")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "unknown (nft not available)"
+    if "lidra_nfqueue" not in tables:
+        return "no inline rule (monitor mode)"
+    try:
+        rules = subprocess.run(
+            ["nft", "list", "table", "inet", "lidra_nfqueue"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout or ""
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "lidra_nfqueue table present (detail unavailable)"
+    if "bypass" in rules:
+        return "[green]inline rule present, fail-open (bypass)[/green]"
+    return "[red]inline rule present WITHOUT bypass - connectivity at risk[/red]"
+
+
+def _db_size_mb(db) -> str:
+    try:
+        path = getattr(db, "db_path", None)
+        if path and Path(path).exists():
+            return f"{Path(path).stat().st_size / 1_048_576:.1f} MB"
+    except OSError:
+        pass
+    return "?"
 
 
 def cmd_alerts(args: List[str]) -> bool:
@@ -169,6 +287,19 @@ def cmd_block_ip(args: List[str]) -> bool:
         return False
     reason = " ".join(args[1:]) if len(args) > 1 else "Manual block"
 
+    # F4: blocking this host's own address, its gateway or its resolver takes
+    # the operator off the network LIDRA is defending. Say so explicitly
+    # instead of letting it surface as a generic firewall failure.
+    from response.firewall import is_protected
+    if is_protected(ip):
+        console.print(
+            f"[red]Refusing to block {ip}[/red] — it is this host's own address, "
+            "default gateway or DNS resolver."
+        )
+        console.print("[dim]Blocking it would take this host off the network.[/dim]")
+        _audit("block_refused", ip, "protected address (own/gateway/resolver)")
+        return False
+
     try:
         fw = _firewall()
     except Exception as e:
@@ -177,13 +308,33 @@ def cmd_block_ip(args: List[str]) -> bool:
     if not fw.block_ip(ip, ttl_seconds=3600):
         console.print(f"[red]Failed to block {ip} (need root?)[/red]")
         return False
+    # Dry-run is the default (`response.dry_run: true`) and means "log every
+    # detection, never block". The firewall returns success without writing a
+    # rule, so the row must stay applied=0 or `lidra status` reports an active
+    # block that does not exist in the kernel.
+    dry_run = bool(getattr(fw, "dry_run", False))
     db = _open_db()
     if db is not None:
         try:
-            db.mark_block_applied(db.add_block(ip, reason))
+            block_id = db.add_block(ip, reason)
+            if dry_run:
+                logger.info("[CLI] dry-run: recorded block for %s without applying it", ip)
+            else:
+                db.mark_block_applied(block_id)
+            db.log_audit(
+                _actor(), "block", ip,
+                f"{reason} (dry-run: not applied)" if dry_run else reason,
+                "cli",
+            )
         except Exception as e:
             logger.warning(f"[CLI] Block applied but DB record failed: {e}")
-    console.print(f"[green]Blocked {ip} (reason: {reason})[/green]")
+    if dry_run:
+        console.print(
+            f"[yellow]DRY-RUN: would block {ip}[/yellow] "
+            f"[dim](reason: {reason} — recorded, no kernel rule written)[/dim]"
+        )
+    else:
+        console.print(f"[green]Blocked {ip} (reason: {reason})[/green]")
     return True
 
 
@@ -208,7 +359,51 @@ def cmd_unblock_ip(args: List[str]) -> bool:
             Blocklist(db).unblock(ip)
         except Exception as e:
             logger.warning(f"[CLI] Unblocked but DB clear failed: {e}")
+    _audit("unblock", ip, "removed by operator")
     console.print(f"[green]Unblocked {ip}[/green]")
+    return True
+
+
+def cmd_audit(args: List[str]) -> bool:
+    """Show the operator audit trail (who blocked/unblocked what, and when)."""
+    limit = 50
+    if args:
+        try:
+            limit = max(1, int(args[0]))
+        except ValueError:
+            console.print(f"[red]Usage: audit [count]  (got {args[0]!r})[/red]")
+            return False
+
+    db = _open_db()
+    if db is None:
+        return False
+
+    entries = db.get_audit_log(limit)
+    if not entries:
+        console.print("[dim]No operator actions recorded yet.[/dim]")
+        return True
+
+    table = Table(title=f"Audit log (last {len(entries)})", box=box.SIMPLE,
+                  show_lines=False)
+    table.add_column("When", style="dim", no_wrap=True)
+    table.add_column("Actor", style="cyan")
+    table.add_column("Action", style="yellow")
+    table.add_column("Target", style="white")
+    table.add_column("Detail")
+    table.add_column("Source", style="dim")
+
+    styles = {"block": "red", "unblock": "green", "block_refused": "orange3"}
+    for entry in entries:
+        action = entry.get("action", "?")
+        table.add_row(
+            str(entry.get("created_at", ""))[:19],
+            entry.get("actor", "?"),
+            f"[{styles.get(action, 'white')}]{action}[/]",
+            entry.get("target", "") or "-",
+            entry.get("detail", "") or "-",
+            entry.get("source", "") or "-",
+        )
+    console.print(table)
     return True
 
 
@@ -297,7 +492,7 @@ def cmd_full_dashboard(args: List[str]) -> bool:
     disk = psutil.disk_usage('/')
 
     console.print("\n" + "="*50)
-    console.print("  LIDRA v3 - SECURITY MONITOR")
+    console.print("  LIDRA - SECURITY MONITOR")
     console.print("="*50)
 
     # ALL IN ONE LINE - Key stats
@@ -395,7 +590,7 @@ def cmd_install(args: List[str]) -> bool:
 def cmd_help(args: List[str]) -> bool:
     """Show help."""
     console.print("""
-[bold cyan]LIDRA v3 Commands:[/bold cyan]
+[bold cyan]LIDRA Commands:[/bold cyan]
 
 [green]Status & Info:[/green]
   lidra           - Full dashboard (all stats) [DEFAULT]
@@ -406,13 +601,15 @@ def cmd_help(args: List[str]) -> bool:
   lidra logs      - Show logs
   lidra doctor    - System health check (read-only)
 
-[yellow]Actions:[/green]
+[yellow]Actions:[/yellow]
   lidra honeypot  - Start honeypot service
   lidra test      - Add test attack data
   lidra install   - Show install instructions
 
 [red]Block Management:[/red]
   lidra block <ip>   - Block an IP
+  lidra unblock <ip> - Unblock an IP
+  lidra audit        - Operator audit trail (who did what)
 
 [blue]System:[/blue]
   lidra help      - Show this help
@@ -428,6 +625,7 @@ COMMANDS = {
     'blocks': (cmd_blocks, 'Show active blocks'),
     'block': (cmd_block_ip, 'Block an IP'),
     'unblock': (cmd_unblock_ip, 'Unblock an IP'),
+    'audit': (cmd_audit, 'Show who blocked/unblocked what'),
     'mitre': (cmd_mitre, 'Show MITRE coverage'),
     'logs': (cmd_logs, 'Show logs'),
     'test': (cmd_test, 'Add test data'),

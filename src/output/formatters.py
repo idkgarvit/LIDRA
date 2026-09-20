@@ -16,6 +16,15 @@ from typing import Dict, Any
 logger = logging.getLogger(__name__)
 
 
+def _observer_version() -> str:
+    """Single-source version for emitted events. Never raises."""
+    try:
+        from utils.version import __version__ as _v
+        return str(_v)
+    except Exception:
+        return "0.0.0"
+
+
 class OutputFormatter:
     """Base class for output formatters."""
     
@@ -56,7 +65,7 @@ class JSONFormatter(OutputFormatter):
             'observer': {
                 'vendor': 'LIDRA',
                 'product': 'LIDRA IDS',
-                'version': '3.0.0',
+                'version': _observer_version(),
                 'type': 'detection'
             },
             'rule': {
@@ -101,7 +110,7 @@ class CEFFormatter(OutputFormatter):
     
     DEVICE_VENDOR = "LIDRA"
     DEVICE_PRODUCT = "LIDRA IDS"
-    DEVICE_VERSION = "3.0.0"
+    DEVICE_VERSION = _observer_version()
     
     SEVERITY_MAP = {
         'critical': 10,

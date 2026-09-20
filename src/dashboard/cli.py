@@ -1,5 +1,5 @@
 # src/dashboard/cli.py
-"""LIDRA v3 CLI Dashboard - Rich terminal interface."""
+"""LIDRA CLI Dashboard - Rich terminal interface."""
 
 import logging
 import time
@@ -13,6 +13,14 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 import psutil
+
+# Version comes from utils/version.py, so the dashboard cannot advertise a
+# different build than the CLI, the logs and `lidra status`.
+try:
+    from utils.version import version_string as _version_string
+    VERSION: str = _version_string()
+except Exception:  # pragma: no cover - dashboard can be imported standalone
+    VERSION = "v0.0.0"
 
 
 console = Console()
@@ -154,9 +162,12 @@ class CLIDashboard:
 
         lines = []
 
-        title = Text("LIDRA v3 - Advanced Detection System", style="bold cyan")
+        title = Text(f"LIDRA {VERSION} - Advanced Detection System", style="bold cyan")
         title.append(" | ", style="dim")
-        title.append("eBPF-Powered Security Monitor", style="dim green")
+        # Was "eBPF-Powered Security Monitor". The eBPF path is inert without
+        # `bcc` and falls back to log monitoring, so the label described a
+        # mechanism the product does not reliably use. Name what runs instead.
+        title.append("Network & Log Monitor", style="dim green")
         lines.append(Panel(title, box=box.DOUBLE))
 
         metrics_table = Table(box=box.SIMPLE)
@@ -280,8 +291,8 @@ class CLIDashboard:
         """Print welcome message with stats."""
         console.clear()
         console.print(Panel(
-            "[bold cyan]LIDRA v3[/bold cyan] - [green]eBPF-Powered Detection System[/green]\n"
-            "[dim]Advanced intrusion detection with real-time monitoring[/dim]",
+            f"[bold cyan]LIDRA {VERSION}[/bold cyan] - [green]Network & Log Intrusion Detection[/green]\n"
+            "[dim]Captures packets and auth logs; blocking is opt-in[/dim]",
             box=box.DOUBLE
         ))
 
@@ -295,7 +306,7 @@ class CLIDashboard:
             mitre = data.get("mitre", {})
 
             console.print("\n" + "="*60)
-            console.print("  LIDRA v3 - SECURITY DASHBOARD")
+            console.print(f"  LIDRA {VERSION} - SECURITY DASHBOARD")
             console.print("="*60 + "\n")
 
             # System Stats

@@ -16,6 +16,15 @@ readline.parse_and_bind("tab: complete")  # arrow-history + tab completion for i
 
 from .commands import COMMANDS
 
+# Single source of truth: utils/version.py. Displayed in the banner title and
+# the --help description; the fixed-width ASCII box deliberately carries no
+# version, so a release cannot misalign it.
+try:
+    from utils.version import version_string as _version_string
+    VERSION: str = _version_string()
+except Exception:  # pragma: no cover - CLI can load without src/ on sys.path
+    VERSION = "v0.0.0"
+
 console = Console()
 
 
@@ -30,7 +39,7 @@ class LIDRACli:
         """Print CLI banner."""
         banner = """
 ╔═══════════════════════════════════════════════════════════════╗
-║                     LIDRA v3 - Security CLI                   ║
+║                      LIDRA - Security CLI                     ║
 ║            Advanced Intrusion Detection System                ║
 ╚═══════════════════════════════════════════════════════════════╝
 
@@ -39,7 +48,7 @@ Type 'help' for available commands, 'exit' to quit
         console.print(Panel(
             Text(banner, style="cyan"),
             border_style="cyan",
-            title="[bold green]LIDRA v3[/bold green]",
+            title=f"[bold green]LIDRA {VERSION}[/bold green]",
             subtitle="[dim]Type 'help' for commands[/dim]"
         ))
 
@@ -138,7 +147,7 @@ def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
         prog='lidra',
-        description='LIDRA v3 - Advanced Intrusion Detection System',
+        description=f'LIDRA {VERSION} - Advanced Intrusion Detection System',
         add_help=False
     )
 
@@ -191,7 +200,7 @@ def main():
 
     if args.help:
         console.print(Panel("""
-[bold]LIDRA v3 - Security CLI[/bold]
+[bold]LIDRA - Security CLI[/bold]
 
 [cyan]Usage:[/cyan]
   lidra [command] [arguments]
@@ -205,14 +214,14 @@ def main():
   alerts        - Show recent alerts
   blocks        - Show active blocks
   mitre         - Show MITRE coverage
-  web           - Show web dashboard URL
+  web           - Alias for dashboard (terminal UI)
   block <ip>    - Block an IP
   unblock <ip>  - Unblock an IP
 
 [cyan]Examples:[/cyan]
   lidra              - Full live dashboard (DEFAULT)
   lidra status       - Quick status
-  lidra web          - Show web dashboard
+  lidra web          - Alias for the terminal dashboard
   lidra block 1.2.3.4 - Block IP
 
 [dim]Run 'lidra' for full live dashboard[/dim]

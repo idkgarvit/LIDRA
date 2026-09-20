@@ -27,20 +27,50 @@ LOGO: str = """\
 \u2502      \u2588\u2588    \u2588\u2588  \u2588\u2588   \u2588\u2588 \u2588\u2588  \u2588\u2588 \u2588\u2588    \u2588\u2588  \u2588\u2588  \u2588\u2588  \u2588\u2588    \u2502
 \u2502        \u2588\u2588\u2588    \u2588\u2588\u2588\u2588\u2588 \u2588\u2588  \u2588\u2588 \u2588\u2588\u2588\u2588\u2588\u2588 \u2588\u2588  \u2588\u2588  \u2588\u2588    \u2502
 \u2502                                                              \u2502
-\u2502             L I D R A   v 3 . 0 . 0                          \u2502
+\u2502             {version_label}                                  \u2502
 \u2502         IDS for the edge \u00b7 real-time \u00b7 inline              \u2502
 \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f
 """
 
 
 TAGLINE: str = "IDS for the edge \u00b7 real-time \u00b7 inline"
-VERSION: str = "v3.0.0"
+try:
+    from utils.version import version_string as _vs
+    VERSION: str = _vs()
+except Exception:
+    VERSION = "v0.0.0"
+
+
+# Placeholder in LOGO, filled at render time. The caption used to be a
+# hardcoded `L I D R A   v 3 . 0 . 0` inside the art, so bumping
+# utils/version.py silently left the TUI advertising the old version — the
+# exact drift the single-source-of-truth change was meant to end.
+_VERSION_LABEL_SLOT = "{version_label}"
+
+
+def _version_label() -> str:
+    """The letter-spaced caption, e.g. ``L I D R A   v 3 . 0 . 0``."""
+    return f"L I D R A   {' '.join(VERSION)}"
 
 
 def _build_logo_text(width: int | None = None) -> Text:
     """Build a Rich ``Text`` with cyan/green gradient for the logo."""
     text = Text()
     lines = LOGO.rstrip("\n").splitlines()
+    label = _version_label()
+    rendered = []
+    for line in lines:
+        if _VERSION_LABEL_SLOT not in line:
+            rendered.append(line)
+            continue
+        # Re-pad to the width the art was authored at, so a longer version
+        # cannot push the right border out of line.
+        inner = len(line) - 2
+        body = line[1:-1].replace(_VERSION_LABEL_SLOT, label)
+        if len(body) > inner:
+            body = body.rstrip()[:inner]
+        rendered.append(line[0] + body.ljust(inner) + line[-1])
+    lines = rendered
     total = max(len(lines), 1)
     for idx, line in enumerate(lines):
         ratio = idx / max(total - 1, 1)

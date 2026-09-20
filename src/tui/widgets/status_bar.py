@@ -23,7 +23,15 @@ from ..themes import THEMES
 logger = logging.getLogger(__name__)
 
 
-VERSION: str = "v3.0.0"
+# Single source of truth: utils/version.py. This used to be a hardcoded
+# "v3.0.0", which made the status bar — the most visible surface in the
+# product — the one place that could still disagree with the CLI, the logs
+# and `lidra status`.
+try:
+    from utils.version import version_string as _version_string
+    VERSION: str = _version_string()
+except Exception:  # pragma: no cover - TUI can load without src/ on sys.path
+    VERSION = "v0.0.0"
 
 
 @dataclass
