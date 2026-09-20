@@ -1,19 +1,49 @@
 #!/bin/bash
-# LIDRA CLI Launcher
-# Main entry point for LIDRA v3 CLI
+# LIDRA launcher.
+#
+# Two front doors, because they are genuinely different things:
+#
+#   ./lidra <command>   read-only inspection (status, alerts, blocks, audit…)
+#                       -> src/cli/main.py, needs no root
+#   ./lidra --tui       the live agent + its terminal UI
+#                       -> src/lidra_agent_v3.py, needs root for AF_PACKET
+#
+# The distinction is real and this file used to get it wrong: `--tui` was
+# forwarded to the read-only CLI, which has no such flag, so `./lidra --tui` —
+# the command the README tells people to run — died with
+# "unrecognized arguments: --tui".
+#
+# Prefer the project venv (it has the pinned deps); fall back to the install
+# prefix, then system python3, so the launcher also works from a bare checkout.
+
+set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIDRA_BASE="$SCRIPT_DIR"
+# `${PYTHONPATH:-}` because `set -u` would abort on an unset variable.
+export PYTHONPATH="$LIDRA_BASE:${PYTHONPATH:-}"
+cd "$LIDRA_BASE" || exit 1
 
-# Add LIDRA base to Python path
-export PYTHONPATH="$LIDRA_BASE:$PYTHONPATH"
+PY=""
+for cand in "$LIDRA_BASE/.venv/bin/python3" \
+            "${LIDRA_PREFIX:-/opt/lidra}/venv/bin/python3" \
+            "$(command -v python3 2>/dev/null)"; do
+    if [ -n "$cand" ] && [ -x "$cand" ]; then PY="$cand"; break; fi
+done
 
-# Check if running in Docker
-if [ -f /.dockerenv ]; then
-    cd "$LIDRA_BASE"
-    python3 -m src.cli.main "$@"
-else
-    # Outside Docker - run from project directory
-    cd "$LIDRA_BASE"
-    python3 -m src.cli.main "$@"
+if [ -z "$PY" ]; then
+    echo "lidra: no python3 found" >&2
+    exit 1
 fi
+
+# Agent flags go to the agent entry point, not the read-only CLI.
+for arg in "$@"; do
+    case "$arg" in
+        --tui|--no-tui|--demo|--mode|--dry-run|--no-dry-run|--local-inline|--no-local-inline|--verbose|--interface)
+            exec "$PY" "$LIDRA_BASE/src/lidra_agent_v3.py" "$@"
+            ;;
+    esac
+done
+
+# Bare `./lidra` (or a read-only subcommand) is the CLI dashboard.
+exec "$PY" -m src.cli.main "$@"

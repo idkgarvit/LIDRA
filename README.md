@@ -141,15 +141,23 @@ git clone https://github.com/idkgarvit/LIDRA.git && cd LIDRA
 ./install.sh              # asks: laptop shield, or company gateway? (or --laptop / --gateway)
 ```
 
-Then watch it:
+The installer copies the tree to `/opt/lidra`, builds a virtualenv there, and
+installs a systemd unit — it does **not** put a `lidra` command on your `PATH`.
+After it finishes:
 
 ```bash
-sudo lidra --tui          # or: lidra-cli dashboard   (join the `lidra` group once, then no sudo)
+sudo systemctl enable --now lidra        # start the agent (and at boot)
+./lidra status                           # read-only status, no root needed
+./lidra --tui                            # attach the live terminal UI (needs root)
 ```
 
-The installer creates a dedicated `lidra` group so the TUI can attach to the
-agent's socket without root, and prints what it changed. Run `lidra-cli doctor`
-for a read-only health check.
+`./lidra` is the launcher in the repo: a subcommand (`status`, `alerts`, `blocks`,
+`audit`, `doctor`…) runs read-only; an agent flag (`--tui`, `--demo`, `--mode`…)
+starts the agent itself. Run `./lidra help` to see the commands.
+
+> `./lidra status` exits **1** when it reports `DEGRADED` — for example when the
+> agent is not running. That is deliberate health-check semantics, not a crash, so
+> it can be used directly in a script or a monitor.
 
 <details>
 <summary>Manual install (if you would rather not run the script)</summary>
