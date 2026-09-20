@@ -25,7 +25,7 @@ LIDRA is a production-ready honeypot-based intrusion detection system designed f
 - **Threat Intelligence** - AbuseIPDB and VirusTotal integration for IP reputation
 - **Instant Alerting** - Slack, Discord, and Email notifications
 - **Automated Response** - iptables/nftables blocking with TTL
-- **Live Dashboard** - Web UI with real-time attack monitoring
+- **Live Dashboard** - Terminal UI with real-time attack monitoring (`lidra tui`)
 - **Docker Ready** - Full containerization support
 
 ## Quick Start
@@ -37,9 +37,8 @@ curl -fsSL https://github.com/idkgarvit/LIDRA/raw/main/install.sh | sudo bash
 # Configure (edit with your API keys/webhooks)
 sudo nano /opt/lidra/config/config.yaml
 
-# Watch it live (no sudo needed)
-cd /opt/lidra/src && LIDRA_TUI_SOCKET=$(ls -t /tmp/lidra_tui_*.sock | head -1) \
-  PYTHONPATH=. python3 -m tui.app --standalone
+# Watch it live (join the `lidra` group once, log out/in, then no sudo needed)
+lidra tui
 ```
 
 Manual run instead of the service:
@@ -74,7 +73,9 @@ Set these via environment variables or `config/config.yaml`:
 >   - Set `LIDRA_METRICS_CERT` + `LIDRA_METRICS_KEY` for TLS, **or**
 >   - Bind to localhost only (`LIDRA_METRICS_HOST=127.0.0.1`), **or**
 >   - Use a reverse proxy (nginx) in front of the agent.
-> - Agent ↔ TUI IPC uses a Unix socket (`/tmp/lidra_tui_<pid>.sock`) — local-only, no TLS needed.
+> - Agent ↔ TUI IPC uses a Unix socket (`/run/lidra/lidra_tui_<pid>.sock`, mode
+>   `0660 root:lidra`) — local-only, no TLS needed. Operators join the `lidra`
+>   group at install to attach without root.
 > - Docker Compose inter-container traffic is on an isolated bridge network.
 
 ## Demo (60 seconds)
@@ -154,7 +155,12 @@ and machine-readable metrics on the Prometheus endpoint:
 |---------|---------|-------------|
 | `GET /metrics` | `:8080` (or `LIDRA_METRICS_PORT`) | Prometheus counters/gauges (packets, attacks, blocks) |
 | TUI dashboard | `--tui` | Attackers, recent attacks, honeypot sessions, manual block/unblock |
-| `lidra-cli` | `python -m cli.main` (from `src/`) | Interactive shell (`block`, `unblock`, `status`) |
+| `lidra-cli` | `python -m cli.main` (from `src/`) | Interactive shell (`block`, `unblock`, `audit`, `status`) |
+
+`lidra audit` shows who changed firewall state and when — block, unblock and
+refused blocks (a request to block this host's own gateway or resolver) are
+recorded with the acting user. For actions made over the TUI's IPC socket the
+user is taken from the kernel's peer credentials, not from the client.
 
 ## Project Structure
 
@@ -271,6 +277,34 @@ Config is reloaded on `SIGHUP` without restart:
 ```bash
 kill -HUP $(cat /var/run/lidra/lidra.pid 2>/dev/null || cat state/lidra.pid)
 ```
+
+## Uninstall
+
+One line, and it works even if this machine's network is misbehaving:
+
+```bash
+sudo ./install/uninstall.sh          # interactive; keeps your database
+sudo ./install.sh --uninstall        # same thing, via the installer
+sudo make uninstall                  # same thing, via the Makefile
+```
+
+From a checkout that no longer exists, the script is self-contained:
+`sudo bash /opt/lidra/install/uninstall.sh`.
+
+What it removes: the `lidra` service (stopped, disabled, and verified dead),
+the systemd unit, the suspend/resume hook, the logrotate config, the NFQUEUE
+rule **LIDRA tagged as its own**, any `lidra_*` nftables tables, and the
+`LIDRA_BLOCK`/`LIDRA` iptables chains.
+
+What it keeps by default: your database (`/opt/lidra/data`), copied beside the
+removed tree as `/opt/lidra.data-keep-<timestamp>` — it is your evidence
+history. `--purge` deletes it after an explicit confirmation; `--yes` answers
+the prompts for scripted removal.
+
+It will not touch a rule it cannot attribute to LIDRA: NFQUEUE rules belonging
+to other tools are reported and left alone. On an install from before LIDRA
+tagged its rules, it asks before removing the untagged rule on LIDRA's
+configured queue number (see `local.nfqueue_num`) and says so.
 
 ### CI/CD
 Every push runs lint, tests across Python 3.11–3.13, config validation, and a Docker build check via GitHub Actions.

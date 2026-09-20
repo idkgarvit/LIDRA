@@ -13,6 +13,63 @@ are moved to §10 with a reason rather than silently dropped.
 
 ---
 
+## 0.1 Status corrections — re-read on 2026-09-18
+
+This plan's method is "where the plan and the code disagreed, the code won".
+Re-reading the tree found several claims that were wrong when written or had
+gone stale. They are recorded with evidence, because a plan that calls a fixed
+item broken re-orders work around a non-problem.
+
+**A note on method, because it matters for two rows below.** A correction is
+only as good as the measurement behind it. Where a claim was tested, say how;
+where it was reasoned, mark it inference — the JA4-alert row below is a
+disproved *inference* that would have caused a real regression if written down
+as a finding.
+
+| Claim | Reality (verified) | Effect |
+|---|---|---|
+| §1.5 no migration path; `schema.sql` *is* the schema | `database/migrations.py` runs `PRAGMA user_version` + ordered steps, takes a backup, refuses a newer DB. `schema.sql` is **deleted** — statement-identical to migration v1, imported by nothing. | §1.5 done |
+| §1.6 `dashboard.api_key` dead key | Deleted from `config_loader.py` and `paths.py` (with `LIDRA_API_KEY`). It was never in `config.yaml`. | §1.6 done |
+| §2.3 F4 "refuses (the `own_ips` guard) — test it, do not assume" | The guard existed **only** in `bridge_block_ip()`. `block_ip()` — the path `lidra block`, the TUI and the IPC socket take — had no own-IP check, so dropping the default route was possible. Now: `protected_ips()` (own + gateway + resolvers) enforced in both entry points, with an explicit refusal. | F4 was a **fix**, not a verification; fixed, live run outstanding |
+| §3.2 "nothing calls JA4 during detection" | Wired: `inline_engine` → `dpi_engine.inspect_stream(..., "tls")` → `TLSFingerprinter.analyze()`, and its constructor loads the 9 hashes from `tls_fingerprints.malicious_ja4`. | T7 is **not** blocked on §3.2; it needs a ClientHello fixture. The per-host baseline half stands |
+| §7.1 `COVERAGE.md` does not exist | It exists: `tests/attack_pcap/COVERAGE.md`, referenced by 6 meta YAMLs. | §7.1 is reconciliation, not authoring |
+| §1.4 web-UI claim | README was fixed, but the product still printed "LIDRA v3 - eBPF-Powered Detection System" on the dashboard, the CLI banner and `--help`. eBPF needs `bcc` and otherwise falls back to log monitoring; `soar/` LLM triage is unwired. Claims removed; the agent docstring now states what is not wired. | §1.4 re-opened and closed; a test scans for the phrases |
+| §4.5 one version string (claimed done) | Still drifted: `tui/widgets/status_bar.py` hardcoded `v3.0.0`, and the TUI logo art carried a baked-in caption. Both now read `utils/version.py`; a tree-scanning test fails on any version literal outside it. | §4.5 closed for real |
+
+### 0.1.1 NEW — a confirmed defect the plan did not know about
+
+| Claim | Reality (verified) | Effect |
+|---|---|---|
+| **(not previously claimed anywhere) ordinary HTTPS creates attackers/attacks rows** | **CONFIRMED DEFECT, now fixed.** `TLSFingerprinter.analyze()` returns a `tls_fingerprint` detection at severity `info` for **any** parseable ClientHello (`dpi_engine.py` passes it through). `core/agent_base.py` wrote the attacker+attack row at `:264`, three lines **above** the `severity in ("high","critical") and verdict == "drop"` gate at `:267`, so the gate never saw it. Every ordinary HTTPS connection grew `attackers`/`attacks`, making the "attackers" figure in `lidra status` grow with normal browsing.<br><br>Reproduce (before fix): build an engine, `_run_detection_pipeline` a TCP/443 packet carrying a ClientHello → `[('tls_fingerprint','info')]` → `analyze_packet_event` returns a `DetectedAttack` → `record_attack` runs. Measured: 5 benign HTTPS connections produced 5 attacker rows and 5 attack rows.<br><br>Fixed: `utils/severity.py` (`is_actionable_severity`) gates the response path in `core/agent_base.py` (both `_handle_detection_event` and the eBPF/log path) and in `lidra_agent_v3._process_network_detection`. The observation is **kept** — still returned by the DPI layer, still counted in Prometheus, still pushed to the TUI as an `observation` event. Pinned both directions by `tests/test_observation_severity.py` (15 tests). | Fixed, verified end-to-end: 20 benign HTTPS connections → 0 rows; known-bad JA4 → attacker + attack + alert |
+| **"JA4 cannot fire an alert — the malicious case never alerts or blocks"** | **DISPROVED. Do not "fix" this — the alert path works.** This was an *inference*, not a measurement: the engine's verdict was assumed to come only from the built-in packet analyzers. It does not. `response/verdict.py::decide_verdict()` scans **all** detections and returns `DROP` if any is high/critical, and the JA4 detection is in that list.<br><br>Verified: `detections: [('malicious_tls_fingerprint','high')]`, `verdict: Verdict.DROP`, gate → alert/block = **True**. Encoded as `tests/test_observation_severity.py::TestMaliciousJA4StillAlerts` and `::TestMaliciousTlsCaptureAlerts` (the latter replays a real capture), so the evidence is collected and cannot go stale silently.<br><br>**The trap that produces the false conclusion:** `TLSFingerprinter.__init__` calls `_load_ja4_db()`, which **rebinds** `_KNOWN_MALICIOUS_JA4` from config. Patch the blocklist and *then* build the engine and the constructor wipes the patch, so everything looks benign. Build the engine first, patch second, then feed the packet. `tests/test_ja4.py` does it in the patched order against a `__new__`-constructed object, which is why it passes. | **No action.** Recorded so the wrong conclusion cannot be re-derived |
+| **`alert_throttle` silently suppressed the first alert after every reboot** | **CONFIRMED DEFECT, now fixed.** `AlertThrottle.allow()` used `self._last.get(key, 0)` as the never-seen sentinel, but `time.monotonic()` is **seconds-since-boot** on Linux. For the first `cooldown_seconds` of uptime, `now - 0 = uptime < cooldown`, so a genuinely first-ever alert was suppressed. With the shipped 900 s alert cooldown, **LIDRA raised no alert at all for the first 15 minutes after a reboot**; and because `LIDRADatabase` reuses this class for record dedupe with a 60 s cooldown, **attack rows were dropped for the first minute** too (proven: a `critical` `sql_injection` recorded 0 rows at uptime < 60 s, 1 row at ≥ 60 s).<br><br>Found by running the suite on a freshly-booted machine, where `tests/test_alert_throttle.py` failed 4/4 and then passed unprompted once uptime crossed 900 s — a flaky-looking failure that was a real bug. | Fixed; regression test `test_first_alert_fires_on_a_freshly_booted_machine` (simulated clock, so it works on long-running CI) |
+| **F4 guard missed every address except the primary egress IP** | **CONFIRMED DEFECT, now fixed (found by the live matrix, case F4).** `protected_ips()` was built from `local_ips()`, which returns only the *primary egress* address (found by UDP-connecting to a public IP) plus hostname addresses. On a single-NIC laptop those coincide — which is why it looked correct. On any box with a second NIC, a VLAN, a bridge or an alias (a Class-C gateway sensor, exactly what this project targets) the secondary addresses were absent, so `lidra block <own-secondary-ip>` was **allowed** and would have taken that segment down.<br><br>Measured in the netns harness: with `10.88.0.1` on a veth, `lidra block 10.88.0.1` reported "DRY-RUN: would block" instead of refusing. Fixed by adding `all_local_ipv4()`, which enumerates every configured IPv4 address from `/proc/net/fib_trie` (world-readable, no subprocess, works under a hardened unit). | Fixed; `tests/test_self_protection.py::test_secondary_interface_addresses_are_protected` |
+| **`unusual_hours_activity` fired on ordinary traffic at night** | **CONFIRMED DEFECT, now fixed (found by running the suite at 04:00).** Two causes: (1) the "near midnight" test was `hour < 6 or hour > 22`, which made 00:00-05:59 an anomaly for *every* host — night shifts, backups, cron and late-night browsing all alerted; (2) there was no floor on observations, so a fresh sensor (few active hours ⇒ tiny `ratio`) reported unusual hours for whatever hour it happened to be installed in. A benign TLS ClientHello and benign DNS both tripped it. | Fixed: a minimum observation count plus a minimum number of active hours before the hour claim is allowed; a host broadly active across the day is no longer flagged for being awake at 4 AM. `tests/test_false_positive_fixes.py::TestUnusualHoursNeedsARealBaseline` |
+
+Fixed alongside, all previously unnoticed:
+
+- `lidra help` crashed on a mismatched Rich tag (`[yellow]Actions:[/green]`)
+  and no test rendered the help text, so it survived.
+- A block was recorded as `applied=1` in dry-run — the shipped default — so
+  `lidra status` reported an active block the kernel never had.
+- NFQUEUE teardown and the uninstaller matched rules by queue number alone; the
+  uninstaller offered to delete *every* NFQUEUE rule in INPUT. LIDRA's rule is
+  now tagged `lidra_nfqueue` and only rules it can prove it owns are removed.
+- The `audit_log` table (schema v2) had no writers. Block/unblock from CLI, TUI
+  and IPC are recorded now; the IPC actor comes from `SO_PEERCRED`, not from the
+  client. `lidra audit` reads it.
+- `install.sh --uninstall`, `make uninstall` and a README **Uninstall** section
+  exist, so the escape route is discoverable.
+- `install/lidra.service` (stale duplicate, wrong user, pre-rename path) deleted;
+  the unit's `install/default/lidra` reference pointed at a file that never
+  existed.
+
+Suite: **377 passed, 1 skipped** (was 312/1 before the observation-severity fix
+and its tests). `tests/conftest.py` fails any test that writes to the
+repository's real database.
+
+---
+
 ## 0. What "production ready" means here — the exit criteria
 
 LIDRA has three deployment shapes with different bars. A feature that is
@@ -162,7 +219,7 @@ Everything so far exercises the pipeline in-process (`_parse_packet` +
 path and the alert-delivery path have never been validated end-to-end on real
 traffic.** This is the largest single body of unverified behaviour.
 
-### 2.1 Detection on real traffic — [blocking, L]
+### 2.1 Detection on real traffic — [blocking, L] — **RUN 2026-09-20, see §2.1.1**
 
 | # | Test | Method | Pass condition |
 |---|---|---|---|
@@ -177,6 +234,56 @@ traffic.** This is the largest single body of unverified behaviour.
 
 T8 is the one that decides whether a human would keep it installed. It cannot be
 shortcut.
+
+### 2.1.1 LIVE MATRIX — first real-traffic run (2026-09-20)
+
+**Everything before this was in-process or pcap replay. This is the first time
+LIDRA detected anything arriving on a real interface.** Harness:
+`tests/live/matrix.sh` (10 cases, `bash tests/live/matrix.sh all`).
+
+Result: **10 passed, 0 failed.** Cases run, and what was actually observed in
+the agent's database afterwards:
+
+| Case | Result | Evidence recorded |
+|---|---|---|
+| T1 port scan (`nmap -sS` at the sensor) | PASS | `port_scan`, `port_hopping`, `syn_burst` from the attacker IP |
+| T2 SYN flood (`hping3 --flood -S`) | PASS | `syn_flood`, `syn_burst` |
+| T3 web attacks (SQLi/XSS/CMDi/traversal over live HTTP) | PASS | `sql_injection`, `xss_attempt`, `command_injection`, `path_traversal` — all four classes |
+| T5 DNS, benign half (real port-53 path) | PASS | **quiet** — no `dns_tunnel`, no `session_correlated_*` |
+| T6 beaconing (12 connections, 1.5 s apart) | PASS | detected, and **1 attack row for 12 beacons** — the alert gate holds live |
+| T7 encrypted C2 (known-bad JA4) | PASS | `malicious_tls_fingerprint` |
+| F4 own-address block | PASS | refused |
+| F1 dry-run block | PASS | reported, and **no kernel rule written** |
+| S7 two rapid restarts | PASS | no NFQUEUE rule left behind |
+| S8 unwritable data dir | PASS | agent survived, DB integrity ok |
+
+**How, without root.** `sudo` needs a password on this box, but
+`unshare --user --map-root-user --net` provides uid 0 *and* full capabilities in
+a private network namespace. The sensor captures on a veth; the attacker runs in
+a **sibling** network namespace behind the other end of that pair, so frames
+genuinely cross the wire.
+
+Four topologies were tried and three are **wrong** — recorded because each one
+silently proves nothing:
+
+1. Both endpoints in one namespace → the kernel short-circuits same-subnet
+   traffic, ARP is never answered, `ping` is 100% loss and the capture port sees
+   only ARP requests. Measured, not assumed.
+2. `ip netns add` → refused unprivileged (writes `/run/netns`, owned by real
+   root).
+3. A child that unshares `--user` as well as `--net` → it gets caps in its own
+   user namespace only, so `ip link set X netns PID` fails with "Invalid netns
+   value".
+4. Working arrangement: the child unshares **only `--net`**, sharing the parent's
+   user namespace. Also: the wrapper must **not** pass `--pid`, or `$!` is a
+   namespaced PID and the move fails the same way.
+
+**Not covered here, and still needing real hardware or a VM:** S1-S6 (inline
+mode, kernel `bypass`, suspend/resume, reboot, old-kernel refusal), S8 as a
+genuinely full filesystem, F2/F3 (TTL expiry, unblock — they write real rules),
+F5/F6 (nft/iptables-legacy backends), §2.4 cross-distro, §2.5 alert delivery to
+real Slack/Discord/SMTP endpoints, and T8's 24-hour soak. Those are not made
+less necessary by this run.
 
 ### 2.2 The internet-safety cases — [blocking, L]
 
@@ -224,16 +331,49 @@ Fedora is the interesting one: `iptables` may be absent entirely, and SELinux ma
 block raw sockets. Either support it or say it is unsupported — do not ship a
 silent failure.
 
-### 2.5 Alert delivery — [blocking for B, S each]
+### 2.5 Alert delivery — [blocking for B, S each] — **RUN 2026-09-20, see below**
 
-`alerts/slack.py`, `discord.py`, `email_alert.py` exist. None has been observed
-delivering to a real endpoint in this session.
+`alerts/slack.py`, `discord.py`, `email_alert.py` exist. None had been observed
+delivering to a real endpoint before this run.
 
-- Verify: Slack webhook, Discord webhook, SMTP, each end-to-end.
-- Verify: behaviour when the webhook 500s, times out, or the host has no route.
-  An alerting failure must not delay a verdict or crash the agent.
-- Verify: the throttle (`alerts/alert_throttle.py`) does not suppress the first
-  alert of a genuinely new incident.
+**Result: Slack, Discord and SMTP all deliver; failure modes are contained.
+Three real defects were found and fixed.**
+
+| Requirement | State |
+|---|---|
+| Slack webhook delivers | **Yes** — payload verified well-formed (`attachments[0].title`, severity/ip fields) |
+| Discord webhook delivers | **Yes** — `embeds[0]` verified; a `200` is correctly treated as *failure* (Discord returns 204) |
+| SMTP delivers | **Yes, after a fix** — it could never have worked before (see defect 1) |
+| Webhook 500 | returns False, no raise, caller unaffected |
+| Webhook hangs | bounded by the 10 s client timeout; the notifier still returns, other channels still send |
+| Host has no route | fails in bounded time; measured with TEST-NET-1 |
+| A raising channel does not stop the others | verified |
+| Throttle does not suppress a new incident | verified through the real notifier: 50 repeats → 1 alert; a new source or a new attack type each get through |
+| **Live end-to-end** | **real `nmap -sS` against the sensor → `low_entropy_isn` + `syn_flood` recorded → 2 webhook payloads delivered** with the forensics pcap path in the message body; agent still alive afterwards |
+
+#### Defects found (all fixed)
+
+1. **`EmailChannel` was never instantiated.** `config/config.yaml` documents a
+   complete `alerts.email` block (`enabled`, `smtp_host`, `smtp_port`,
+   `username`, `password`, `from_addr`, `to_addrs`) but `_init_alerting()` read
+   only Slack and Discord — the documented SMTP channel was unreachable. Now
+   wired, with the password resolved through `resolve_secret` so
+   `LIDRA_SMTP_PASSWORD` works instead of a plaintext config value.
+
+2. **`smtplib.SMTP()` had no timeout — measured a 133-second block.** The
+   default is *infinite*, and `notify()` runs on the detection worker, the same
+   thread that writes rows and pushes TUI events. An unreachable mail host did
+   not merely lose an alert; it backpressured the verdict path for over two
+   minutes. Now an explicit 10 s default.
+
+3. **`starttls()` was unconditional**, so only port 587 could ever work: port 25
+   (plain relay) failed outright and port 465 (implicit TLS) failed on the
+   STARTTLS handshake. Transport is now derived from the port
+   (465 → `SMTP_SSL`, 587 → STARTTLS, anything else → plain) with an override.
+
+Evidence: `tests/test_alert_delivery.py` (19 tests) — real listeners on
+localhost, the real channel classes, the real `AlertNotifier`. Each fix was
+falsified by reverting it and confirming the test fails.
 
 ---
 
@@ -246,7 +386,7 @@ the plan imply the coverage exists.
 
 | Module | Size | Reachable from agent? | Action |
 |---|---|---|---|
-| `detection/fingerprint/tls_fingerprinter.py` (JA4) | present, `tests/test_ja4.py` passes | **No** — not referenced in `inline_engine.py` or the agent | §3.2 wire, or delete |
+| `detection/fingerprint/tls_fingerprinter.py` (JA4) | present, `tests/test_ja4.py` passes | **Yes** — `inline_engine` → `dpi_engine.inspect_stream(..., "tls")` → `TLSFingerprinter.analyze()` (this row said "No" and was stale; corrected 2026-09-18, see §0.1) | wired; the per-host baseline half remains (§3.2) |
 | `intel/federated.py` | 78 LOC | **No** — zero importers | delete or defer (§10) |
 | `detection/analyzer/fp_feedback.py` | 66 LOC | **No** — self-references only | wire (it is the auto-FP-dampening the FP work needs) or delete |
 | `ebpf/xdp_loader.py` | 966 LOC, `XDP_README.md`, `Makefile` target | **No** — and `tracer.py` fails on missing `bcc`, so the whole eBPF path is inert | §8.1 |
@@ -281,29 +421,101 @@ blocklist catches known tools; a baseline catches *new* ones, which is where the
 points above 90% live.
 
 - Acceptance: T7 in §2.1 passes; a fixture with a known-bad ClientHello raises
-  `tls_fingerprint_mismatch`; a normal browser does not.
+  `malicious_tls_fingerprint`; a normal browser does not.
+
+  **§3.2 acceptance name corrected 2026-09-18:** this originally said
+  `tls_fingerprint_mismatch`, which **no code emits**. The strings the code
+  actually produces are `tls_fingerprint` (severity `info`, any parseable
+  ClientHello) and `malicious_tls_fingerprint` (severity `high`, hash in
+  `tls_fingerprints.malicious_ja4`). An acceptance criterion naming a
+  non-existent attack type cannot be satisfied, and someone would have
+  "fixed" the mismatch by inventing the string.
+
+  Note the interaction with §0.1.1: `tls_fingerprint` at `info` is now
+  deliberately non-actionable, so "a normal browser does not [raise]" holds in
+  the response sense (no row, no alert, no block) while the DPI layer still
+  reports the observation. See `tests/test_observation_severity.py`.
 
 ### 3.3 Remaining false positives — [blocking for A, M]
 
 Measured after the alert-gate and detector fixes:
 
-| Capture | Now | Residual cause |
-|---|---|---|
-| `clean.pcap` (benign DNS) | 6 / 4956 (0.12%) | `dns_tunnel` borderline on high-entropy queries |
-| `web_traffic.pcap` (benign HTTP) | 46 / 1200 (3.8%) | `low_entropy_isn` (highest severity of the FPs — reports "spoofed" high) and `session_correlated_sql_attack` on base64-looking CDN bodies |
+| Capture | Before 2026-09-19 | **Now** | Residual cause |
+|---|---|---|---|
+| `clean.pcap` (benign DNS) | 6 / 4956 (0.12%) | **6 / 4956 (0.12%)** | `dns_tunnel` 2, `session_correlated_cmd_attack` 2, `session_correlated_sql_attack` 2 — all at the borderline; see note below |
+| `web_traffic.pcap` (benign HTTP) | 46 / 1200 (3.8%) | **0 / 1200 (0.00%)** | none — cleared |
+| `https_traffic.pcap` (benign TLS) | 0 / 60 actionable | **0 / 60** | 12 packets carry a severity-`info` `tls_fingerprint` observation, non-actionable by design (§0.1.1) |
 
-The 3.8% is still too high for a tool a person leaves running. `low_entropy_isn`
-in particular fires at **high** severity on replay/synthetic ISNs, and its
-window does not reset on alert.
+**Target met: both benign captures are now ≤0.5% actionable, and the HTTP
+capture is at zero.** `web_traffic` went 3.83% → 0.00%; `clean.pcap` was already
+inside budget and did not regress.
 
-- Fix: treat `low_entropy_isn` as requiring corroboration before high severity
-  (a real spoofed-ISN attack has other marks — RST storms, no handshake
-  completion). Require the session correlator to see the pattern across distinct
-  connections, not within one.
-- Fix: `session_correlated_*` must not fire on responses (server→client); it is
-  currently judging CDN payloads as if they were requests.
-- Target: **<0.5% on both benign captures**, with the numbers recorded in the
-  meta files (the `fp_rate_baseline` fields already exist for this).
+### What the four defects actually were
+
+Every one was found by diagnosis — reading the capture, instrumenting the
+detector, and checking the claim. None was fixed by widening the severity
+filter, and no detector's severity was changed.
+
+1. **`session_correlated_sql_attack` (18 of 46) — `/*` matched `Accept: */*`.**
+   The SQL-fragment regex treated the comment opener `/*` as a fragment, and
+   `Accept: */*` is the most common HTTP header value in existence. Every
+   `GET / HTTP/1.1` counted as SQL, so after 5 requests in 30 s the host was
+   reported at **high** severity. Fixed with a negative lookbehind.
+
+2. **`low_entropy_isn` (24 of 46) — a zero ISN is not spoofing.** The detector
+   flagged identical ISNs as "possible replay/spoofing", but most pcap writers
+   (and scapy's default) emit `seq=0`, and `web_traffic`, `syn_flood` and
+   `nmap_syn_scan` *all* carry zero ISNs — so the check distinguished nothing.
+   It now requires a non-zero sample **and** failed-connection evidence: a host
+   whose handshakes complete is talking to a real peer. This is the corroboration
+   §3.3 predicted it needed.
+
+3. **Timing detectors measured the wrong clock.** `slow_loris`,
+   `short_connection` and `timing_evasion` read `time.time()` — *when the
+   pipeline ran*. A pcap replay runs at CPU speed (1,200 packets in **0.095 s**),
+   so every connection looked like a sub-500 ms scan. They now take the capture
+   timestamp the engine passes in (`_parse_packet(capture_ts=...)`). This matters
+   in production too: under a capture backlog the live path had the same defect
+   in the other direction.
+
+4. **"Low-volume host" only inspected 60 packets.** `clean.pcap`'s DNS resolver
+   sends **2,477** packets but counted as quiet, so its ordinary query/response
+   bursts (0 ms apart, then 10 s idle, repeated) read as scripted pacing.
+   Measuring the host's real volume plus requiring bursts to be *runs* of ≥3
+   packets removed it (measured on the capture: 2 alerts → 0).
+
+### Evidence
+
+`tests/test_false_positive_fixes.py` (19 tests) pins each fix **in both
+directions** — benign input is silent, and the attack each detector exists for
+still fires (`unanswered SYN flood`, `non-zero predictable counter`, `real paced
+evasion`, `real SQLi`). Each was verified to fail when its fix is reverted. The
+corpus harness also tightened: `expected_max_false_positives` on the HTTP capture
+went from 150 (a budget that could not fail at 3.8%) to 5.
+
+**What is still outstanding:** the 6 `clean.pcap` hits are borderline detector
+calls on a synthetic DNS corpus, and `session_correlated_*` still judges
+content without regard to direction — the plan's original note that it should
+not treat server→client responses as requests remains true and unaddressed.
+Neither is in the benign-HTTP path that gates T8.
+
+**Status: the [blocking for A] part of this section is done.** The two things
+the target asked for were exactly the two things that turned out to be the
+defects, and both are implemented:
+
+- ~~`low_entropy_isn` requires corroboration before high severity~~ — **done.**
+  A non-zero ISN sample plus failed-handshake evidence. A real spoofed-ISN
+  attack still flags; a host whose connections complete does not.
+- ~~`session_correlated_*` must not fire on responses~~ — **partially done.**
+  The `/*` collision that caused 18 of the 18 HTTP hits is fixed, but the
+  direction-blindness itself is still there: the correlator has no notion of
+  request vs response. It no longer fires on this corpus, but for the wrong
+  reason (the token no longer matches), not because direction was considered.
+  **This remains open and is the next real improvement here.**
+
+Remaining, and not blocking: the 6 `clean.pcap` hits are borderline calls on a
+synthetic DNS corpus (`dns_tunnel`, `session_correlated_*`), all at the
+detector's own threshold.
 
 ### 3.4 The evidence table — [blocking for A, M]
 
