@@ -34,12 +34,18 @@ Opt-in for the 30MB pcap: `RUN_SLOW_PCAPS=1 python3 -m pytest tests/test_attack_
 | Metric | Before fixes | After fixes |
 |---|---|---|
 | Attack pcaps tested | 12 | 12 |
-| Detected (cleanly) | 8 (67%) | 8 (67%) |
-| Partially detected | 3 (25%) | 3 (25%) |
+| Detected (cleanly) | 8 (67%) | 9 (75%) |
+| Partially detected | 3 (25%) | 2 (17%) |
 | Missed entirely | 1 (NBTScan) | 1 (NBTScan) |
-| Attack packets correctly flagged | 95% | 95% |
-| **Benign DNS FP rate** | **90%** | **7.3%** |
-| **Benign web FP rate** | **58% (was 76%)** | **7.75%** |
+| **Benign DNS FP rate** | **90%** | **0.12%** (6/4956) |
+| **Benign web FP rate** | **58%** | **0.00%** (0/1200) |
+| **Benign TLS FP rate** | *no TLS capture existed* | **0 actionable** (12 `info` observations) |
+
+> The "after" column was re-measured on 2026-09-20 and replaces earlier figures
+> (7.3% DNS, 7.75% web) that predated the §3.3 detector fixes. The per-row
+> detail table above is the authoritative source; where the two disagree, the
+> detail table is correct. A TLS capture did not exist before that date, which
+> is how the `info`-severity row leak stayed invisible.
 
 ## Real bugs found and fixed
 

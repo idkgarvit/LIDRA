@@ -267,7 +267,7 @@ bash tests/live/matrix.sh all      # or: bash tests/live/matrix.sh list
 |---|---|
 | `t1_portscan` | a real `nmap` SYN scan is detected |
 | `t2_synflood` | a real flood is detected |
-| `t3_webatk` | all four web attack classes fire |
+| `t3_web` | web attack classes fire (SQLi, XSS, command injection) |
 | `t5_dns` | **negative control** — benign DNS is *not* flagged |
 | `t6_beacon` | 12 beacons produce exactly **1** row (the gate holds live) |
 | `t7_ja4` | a malicious JA4 reaches the block decision |
