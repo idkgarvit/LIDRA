@@ -34,7 +34,10 @@ def _post_process_secrets(cfg: dict):
         ("alerts.email.password", "smtp", "password"),
         ("threat_intel.abuseipdb_api_key", "abuseipdb", "api_key"),
         ("threat_intel.virustotal_api_key", "virustotal", "api_key"),
-        ("dashboard.api_key", "dashboard", "api_key"),
+        # NOTE: `dashboard.api_key` used to be here. Nothing ever read it — there
+        # is no served dashboard to authenticate — and dead config that implies a
+        # security control is worse than no config, so it was deleted (plan
+        # section 1.6). If a web view is ever added it needs real auth first.
         ("alerts.slack_webhook", "slack", "webhook"),
         ("alerts.discord_webhook", "discord", "webhook"),
     ]

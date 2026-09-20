@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DB_CANDIDATES = (
     "data/lidra.db",
     "./data/lidra.db",
-    "/path/to/LIDRA/data/lidra.db",
+    # A hardcoded "/home/<author>/Project/LIDRA/data/lidra.db" used to be here.
+    # It leaked a username into the source and pointed at the pre-rename
+    # checkout; path resolution belongs to utils.paths, not to this module.
 )
 
 
@@ -47,23 +49,18 @@ def _resolve_db_path() -> Optional[Path]:
     return None
 
 def _resolve_socket_path() -> Optional[str]:
-    """Find the most recent LIDRA TUI IPC socket."""
-    sock_dir = "/tmp"
-    prefix = "lidra_tui_"
-    candidates = []
+    """Find the most recent LIDRA TUI IPC socket.
+
+    Delegates to utils.runtime, which knows the current runtime directory and
+    still scans the legacy /tmp location so an upgrade does not orphan a
+    running agent's socket.
+    """
     try:
-        for name in os.listdir(sock_dir):
-            if name.startswith(prefix) and name.endswith(".sock"):
-                pid = name[len(prefix):-5]
-                path = os.path.join(sock_dir, name)
-                if pid.isdigit() and os.path.exists(f"/proc/{pid}"):
-                    candidates.append((int(pid), path))
-    except (PermissionError, FileNotFoundError):
-        logger.debug("[TUI] No socket candidates")
-    if candidates:
-        candidates.sort(reverse=True)
-        return candidates[0][1]
-    return None
+        from utils.runtime import find_socket
+        return find_socket()
+    except Exception as e:
+        logger.debug("[TUI] Socket discovery failed: %s", e)
+        return None
 
 
 class TUIDataProvider:
@@ -720,6 +717,7 @@ class TUIDataProvider:
                     "VALUES (?, ?, datetime('now', '+1 hour'))",
                     (ip, reason),
                 )
+                self._audit(conn, "block", ip, reason)
                 conn.commit()
                 ok = True
             except sqlite3.Error as exc:
@@ -745,6 +743,7 @@ class TUIDataProvider:
                     "AND block_until > datetime('now')",
                     (ip,),
                 )
+                self._audit(conn, "unblock", ip, "via TUI")
                 conn.commit()
                 ok = True
             except sqlite3.Error as exc:
@@ -752,6 +751,20 @@ class TUIDataProvider:
             finally:
                 conn.close()
         return ok
+
+    @staticmethod
+    def _audit(conn, action: str, target: str, detail: str = "") -> None:
+        """Write an operator action to the audit trail (plan section 5.9).
+
+        Uses the caller's connection so the audit row lands in the same
+        transaction as the change it describes.
+        """
+        from utils.actor import current_actor
+        conn.execute(
+            "INSERT INTO audit_log (actor, action, target, detail, source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (current_actor(), action, target, detail, "tui"),
+        )
 
     def get_system_stats(self) -> Dict:
         """Return live CPU / memory / disk / uptime counters."""

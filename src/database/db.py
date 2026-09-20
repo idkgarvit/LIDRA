@@ -1,6 +1,7 @@
 # src/database/db.py
 """LIDRA Database Layer - SQLite backend for production use."""
 
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -8,6 +9,13 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from utils.alert_throttle import AlertThrottle
+from database.migrations import (
+    SchemaTooNewError,
+    migrate,
+    record_binary_version,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class LIDRADatabase:
@@ -51,20 +59,27 @@ class LIDRADatabase:
             raise
 
     def _init_schema(self):
-        """Initialize database schema from SQL file."""
-        import sqlite3 as _sqlite3
-        schema_file = Path(__file__).parent / "schema.sql"
-        if schema_file.exists():
-            with open(schema_file, 'r') as f:
-                schema_sql = f.read()
-            conn = self._get_connection()
-            try:
-                conn.executescript(schema_sql)
-            except _sqlite3.OperationalError as e:
-                err = str(e).lower()
-                if "already exists" in err or "duplicate" in err:
-                    return
-                raise
+        """Bring the database up to the current schema version.
+
+        Uses the migration runner instead of replaying schema.sql and ignoring
+        "already exists" — that approach silently left an upgraded install on
+        its old schema while reporting success. See database/migrations.py.
+        """
+        conn = self._get_connection()
+        try:
+            version = migrate(conn, db_path=str(self.db_path))
+            if version:
+                try:
+                    from utils.version import __version__
+                    record_binary_version(conn, __version__)
+                except Exception:
+                    pass
+        except SchemaTooNewError:
+            # Refusing to open is the correct behaviour, but it must be loud.
+            raise
+        except sqlite3.Error as e:
+            logger.error("[DB] Schema migration failed: %s", e)
+            raise
 
     def add_attacker(self, ip: str, country: str = None, org: str = None) -> int:
         """Add or update attacker record. Returns attacker_id."""
@@ -169,6 +184,37 @@ class LIDRADatabase:
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("UPDATE blocks SET applied = 1 WHERE id = ?", (block_id,))
+
+    def log_audit(self, actor: str, action: str, target: str = "",
+                  detail: str = "", source: str = "") -> int:
+        """Record an action that changed (or tried to change) firewall state.
+
+        The table was created by schema migration v2 and nothing wrote to it
+        until this was wired: block/unblock from the CLI, TUI and IPC socket
+        left no record of *who* did it, which is the first question asked after
+        an incident (plan section 5.9). ``actor`` is resolved by the caller —
+        for the IPC path it comes from the kernel's peer credentials, not from
+        anything the client claims.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO audit_log (actor, action, target, detail, source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (actor or "unknown", action, target or "", detail or "", source or ""),
+        )
+        return cursor.lastrowid
+
+    def get_audit_log(self, limit: int = 50) -> list:
+        """Most recent audit entries, newest first."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT actor, action, target, detail, source, created_at "
+            "FROM audit_log ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
     def record_honeyfile_hit(self, file_path: str, ip: str = None, event_type: str = None):
         """Record honeyfile access."""

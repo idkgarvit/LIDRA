@@ -48,7 +48,8 @@ def resolve_secret(category: str, key: str, config_value: Optional[str] = None) 
         ("smtp", "password"): "LIDRA_SMTP_PASSWORD",
         ("abuseipdb", "api_key"): "LIDRA_ABUSEIPDB_KEY",
         ("virustotal", "api_key"): "LIDRA_VT_KEY",
-        ("dashboard", "api_key"): "LIDRA_API_KEY",
+        # ("dashboard", "api_key"): "LIDRA_API_KEY" — removed with the dead
+        # `dashboard.api_key` config key (plan section 1.6); nothing read it.
         ("slack", "webhook"): "SLACK_WEBHOOK",
         ("discord", "webhook"): "DISCORD_WEBHOOK",
     }
