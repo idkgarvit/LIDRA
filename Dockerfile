@@ -39,6 +39,14 @@ FROM base AS demo
 CMD ["python3", "-m", "src.tui.app", "--demo"]
 
 FROM base AS test
+# The test stage needs the test dependencies too. It previously ran
+# `python3 -m pytest` straight after `FROM base`, but base installs only
+# requirements.txt, so the stage died with
+#   /usr/local/bin/python3: No module named pytest
+# and the docker job failed on every push. requirements-test.txt includes
+# -r requirements.txt, so one install covers both.
+COPY requirements-test.txt .
+RUN pip install --no-cache-dir -r requirements-test.txt
 COPY Dockerfile Dockerfile
 COPY tests/ tests/
 COPY demo/ demo/

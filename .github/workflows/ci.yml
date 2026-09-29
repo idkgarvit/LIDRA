@@ -29,9 +29,9 @@ jobs:
 
       - name: Check import sanity
         run: |
-          PYTHONPATH=src python -c "
-            import sys; sys.path.insert(0, 'src')
-            mods = [
+          PYTHONPATH=src python - <<'PYEOF'
+          import sys; sys.path.insert(0, 'src')
+          mods = [
               'lidra_agent_v3',
               'detection.dpi_engine',
               'detection.ml.anomaly',
@@ -44,12 +44,19 @@ jobs:
               'tui.app',
               'ebpf.tracer',
               'metrics.server',
-            ]
-            for m in mods:
-              __import__(m)
-              print(f'  OK  {m}')
-            print('All imports OK')
-          "
+          ]
+          bad = []
+          for m in mods:
+              try:
+                  __import__(m)
+                  print(f'  OK  {m}')
+              except Exception as exc:
+                  print(f'  FAIL {m}: {type(exc).__name__}: {exc}')
+                  bad.append(m)
+          if bad:
+              raise SystemExit(f'{len(bad)} module(s) failed to import: {bad}')
+          print('All imports OK')
+          PYEOF
 
       - name: Run tests
         run: |
