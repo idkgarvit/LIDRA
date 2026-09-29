@@ -51,8 +51,14 @@ class Toast(Static):
     }
     """
 
-    def __init__(self, message: str, level: str = "info") -> None:
-        super().__init__(message, classes=f"toast {level}")
+    def __init__(self, message: str = "", level: str = "info", **kwargs) -> None:
+        # **kwargs must be forwarded: compose() constructs this with id="toast-slot",
+        # and swallowing it raised
+        #   TypeError: Toast.__init__() got an unexpected keyword argument 'id'
+        # which broke CommandBar.compose() and therefore the whole TUI on
+        # Textual 8.x — the app could not start at all.
+        kwargs.setdefault("classes", f"toast {level}")
+        super().__init__(message, **kwargs)
         self._message = message
         self._level = level
 

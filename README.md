@@ -6,6 +6,12 @@ LIDRA watches real packets and real logs on a Linux box, decides what is an
 attack and what is ordinary traffic, and can block the source — with a firewall
 rule you can audit afterwards.
 
+![LIDRA terminal interface showing detected attackers](docs/images/tui.png)
+
+*The real TUI, captured by rendering the running application — the attacker rows
+are genuine detections produced by replaying captures in `tests/attack_pcap/`
+through the engine. Reproduce with `python docs/images/_capture_tui.py`.*
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-377%20passing-brightgreen.svg)](#testing)
