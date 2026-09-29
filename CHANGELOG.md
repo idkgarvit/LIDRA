@@ -110,6 +110,18 @@ three defects:
   tested: 500, hang, and no-route each return in bounded time without raising.
   (`tests/test_alert_delivery.py`)
 
+### Fixed — the interface did not start
+
+- **The whole TUI crashed on launch, and no test noticed.** LIDRA's own `Toast`
+  widget accepted only the two arguments it happened to need, so
+  `Toast("", id="toast-slot")` inside `CommandBar.compose()` raised
+  `TypeError: Toast.__init__() got an unexpected keyword argument 'id'`. The
+  `id` was swallowed, Textual failed the compose, and the app died before
+  drawing a single frame — on the installed Textual 8.x, the entire visible
+  product was unusable. `Toast` now forwards `**kwargs`. Added
+  `tests/test_tui_smoke.py`, which composes the real app and asserts the frame
+  has content; before it, 377 passing tests never started the UI.
+
 ### Fixed — architecture and hygiene
 
 - **Four version strings, already drifted.** The CLI, the banner, the TUI status
