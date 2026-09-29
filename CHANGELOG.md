@@ -163,7 +163,7 @@ three defects:
 
 ### Verified
 
-- **377 tests passing, 1 skipped**, in both a deep and a shallow `TMPDIR` (two
+- **380 tests passing, 1 skipped**, in both a deep and a shallow `TMPDIR` (two
   socket tests used to fail only in the deep one, because the `AF_UNIX` path
   exceeded 108 bytes).
 - Alert delivery, end to end on live traffic: a real `nmap -sS` against the sensor

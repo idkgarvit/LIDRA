@@ -14,7 +14,7 @@ through the engine. Reproduce with `python docs/images/_capture_tui.py`.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-377%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-380%20passing-brightgreen.svg)](#testing)
 [![CI](https://github.com/idkgarvit/LIDRA/actions/workflows/tests.yml/badge.svg)](https://github.com/idkgarvit/LIDRA/actions/workflows/tests.yml)
 
 ---
@@ -44,7 +44,7 @@ is an estimate.
 | **Benign TLS** — `https_traffic.pcap`, 60 ClientHellos | 12 flagged, all `tls_fingerprint` at severity `info` — an observation, never an alert | same |
 | **Handshake completion** — benign vs. attacker | benign **100%**, `nmap_syn_scan` **0.45%**, `syn_flood` **0%** | asserted behaviourally in `tests/test_false_positive_fixes.py` (see note) |
 | **Live traffic matrix** — 10 cases, real packets, no root | **10 / 10 pass** | `bash tests/live/matrix.sh all` |
-| **Test suite** | **377 passed, 1 skipped** | `pytest tests/ -q` |
+| **Test suite** | **380 passed, 1 skipped** | `pytest tests/ -q` |
 
 **Note on the handshake row.** The three percentages were measured ad-hoc while
 diagnosing the false positives, and the *behaviour* they describe is what the
@@ -255,7 +255,7 @@ Three details worth knowing:
 
 ```bash
 .venv/bin/pip install -r requirements-test.txt
-.venv/bin/python -m pytest tests/ -q          # 377 passed, 1 skipped
+.venv/bin/python -m pytest tests/ -q          # 380 passed, 1 skipped
 ```
 
 The suite includes a **pcap replay harness** that runs real captures through the

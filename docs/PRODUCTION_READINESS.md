@@ -64,7 +64,7 @@ Fixed alongside, all previously unnoticed:
   the unit's `install/default/lidra` reference pointed at a file that never
   existed.
 
-Suite: **377 passed, 1 skipped** (was 312/1 before the observation-severity fix
+Suite: **380 passed, 1 skipped** (was 312/1 before the observation-severity fix
 and its tests). `tests/conftest.py` fails any test that writes to the
 repository's real database.
 

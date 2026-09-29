@@ -9,7 +9,7 @@ they exist because breaking them has cost real debugging time here.
 git clone https://github.com/idkgarvit/LIDRA.git && cd LIDRA
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt -r requirements-test.txt
-.venv/bin/python -m pytest tests/ -q          # expect: 377 passed, 1 skipped
+.venv/bin/python -m pytest tests/ -q          # expect: 380 passed, 1 skipped
 ```
 
 You do **not** need root for the test suite. The live-traffic harness uses
