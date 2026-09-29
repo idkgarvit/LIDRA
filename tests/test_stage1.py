@@ -389,7 +389,16 @@ class TestNoUndemonstrableClaims:
         assert not offenders, "undemonstrable capability claim(s): " + "; ".join(offenders)
 
     def test_readme_does_not_claim_an_unwired_mechanism(self):
+        # This audits the SOURCE TREE, so it needs README.md to be present.
+        # It is not present in every environment the suite runs in: the Docker
+        # `test` stage copies only tests/ and demo/ onto the base image, and
+        # .dockerignore excludes *.md, so /opt/lidra/README.md does not exist
+        # and this raised FileNotFoundError. Skip when the file is absent, but
+        # still fail when it IS present and makes a banned claim — the whole
+        # point is to catch the claim, not to require the file.
         readme = Path(__file__).resolve().parent.parent / "README.md"
+        if not readme.exists():
+            pytest.skip("README.md not in this environment (source-tree-only check)")
         text = readme.read_text(encoding="utf-8")
         for claim in _BANNED_CLAIMS:
             assert claim not in text, f"README still claims {claim!r}"
