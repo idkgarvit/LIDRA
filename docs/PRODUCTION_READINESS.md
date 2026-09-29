@@ -248,7 +248,7 @@ the agent's database afterwards:
 |---|---|---|
 | T1 port scan (`nmap -sS` at the sensor) | PASS | `port_scan`, `port_hopping`, `syn_burst` from the attacker IP |
 | T2 SYN flood (`hping3 --flood -S`) | PASS | `syn_flood`, `syn_burst` |
-| T3 web attacks (SQLi/XSS/CMDi/traversal over live HTTP) | PASS | `sql_injection`, `xss_attempt`, `command_injection`, `path_traversal` — all four classes |
+| T3 web attacks (SQLi/XSS/CMDi over live HTTP) | PASS | `sql_injection`, `xss_attempt`, `command_injection` — the case also sends a path-traversal probe but its assertion counts only these three |
 | T5 DNS, benign half (real port-53 path) | PASS | **quiet** — no `dns_tunnel`, no `session_correlated_*` |
 | T6 beaconing (12 connections, 1.5 s apart) | PASS | detected, and **1 attack row for 12 beacons** — the alert gate holds live |
 | T7 encrypted C2 (known-bad JA4) | PASS | `malicious_tls_fingerprint` |

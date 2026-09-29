@@ -45,6 +45,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The attacker namespace exits as soon as $ROOT/atk.stop exists, and cleanup
+# leaves that file behind for the NEXT process to find — every case shares
+# /tmp/lidra_live and matrix.sh runs each case as a separate process. Left
+# alone, a new case's attacker namespace saw the stale flag and quit within
+# 0.2 s, so the precheck's ping failed and the case reported
+# "capture-precheck" — a harness artifact, not a detector failure.
+rm -f "$ROOT/atk.stop"
+
 # ── topology ───────────────────────────────────────────────────────────────
 
 setup_net() {
@@ -63,19 +71,66 @@ setup_net() {
   # Use the PARENT-visible PID ($!), not the child's own $$ — with an outer
   # --pid --fork the child's $$ is a PID inside that namespace and the kernel
   # rejects it ("Invalid netns value"). That mistake cost a full cycle.
+  #
+  # The child signals readiness by creating atk.up, and ONLY after verifying
+  # that atk0 really exists and carries the address.
+  #
+  # ORDERING (the real bug this fixes). `unshare --net ... &` forks and returns
+  # immediately, but the CHILD HAS NOT ENTERED ITS NAMESPACE YET — unshare(2)
+  # runs inside the child. The parent then reads /proc/$ATK_PID/ns/net, and if
+  # the child has not got there yet that path still names the PARENT's
+  # namespace, so `ip link set atk0 netns $ATK_PID` is a no-op: atk0 "moves" to
+  # where it already was. The child then enters a fresh empty namespace and
+  # atk0 never appears. Observed as the attacker ns showing only `lo`, with the
+  # case failing "capture-precheck" — intermittently, a different case each run,
+  # because it is a pure race.
+  #
+  # Fix: the child writes ns.ready as its FIRST action, after unshare has
+  # happened. The parent waits for that file before touching atk0.
+  rm -f "$ROOT/atk.up" "$ROOT/ns.ready"
   unshare --net bash -c '
+    : > '"$ROOT"'/ns.ready
     ip link set lo up 2>/dev/null
-    for _ in $(seq 1 60); do ip link show atk0 >/dev/null 2>&1 && break; sleep 0.1; done
-    ip addr add '"$ATK_IP"'/24 dev atk0 2>/dev/null
-    ip link set atk0 up 2>/dev/null
-    : > '"$ROOT"'/atk.up
+    ok=0
+    for _ in $(seq 1 150); do
+      if ip link show atk0 >/dev/null 2>&1; then
+        ip addr add '"$ATK_IP"'/24 dev atk0 2>/dev/null
+        ip link set atk0 up 2>/dev/null
+        if ip -4 addr show dev atk0 2>/dev/null | grep -q '"$ATK_IP"'; then
+          ok=1; break
+        fi
+      fi
+      sleep 0.1
+    done
+    if [ "$ok" = "1" ]; then : > '"$ROOT"'/atk.up; fi
     while [ ! -f '"$ROOT"'/atk.stop ]; do sleep 0.2; done
   ' &
   ATK_PID=$!
   [ -n "$ATK_PID" ] || { echo "  !! attacker ns did not start"; return 1; }
+
+  # Wait until the child is genuinely inside its new network namespace before
+  # handing atk0 over; otherwise the move lands in the wrong place.
+  local i
+  for i in $(seq 1 100); do [ -f "$ROOT/ns.ready" ] && break; sleep 0.1; done
+  if [ ! -f "$ROOT/ns.ready" ]; then
+    echo "  !! attacker ns never signalled readiness"; return 1
+  fi
+  # The child's namespace must now DIFFER from ours, or the move is pointless.
+  if [ "$(readlink /proc/$ATK_PID/ns/net)" = "$(readlink /proc/self/ns/net)" ]; then
+    echo "  !! attacker ns shares ours — atk0 would not cross a namespace"
+    return 1
+  fi
+
   ip link set atk0 netns "$ATK_PID" || { echo "  !! could not move atk0 to ns $ATK_PID"; return 1; }
-  for _ in $(seq 1 40); do [ -f "$ROOT/atk.up" ] && break; sleep 0.1; done
-  sleep 1
+  # Verify readiness instead of assuming it: this used to wait for atk.up and
+  # then `return 0` unconditionally, so a failed setup was reported as success.
+  for i in $(seq 1 100); do [ -f "$ROOT/atk.up" ] && break; sleep 0.1; done
+  if [ ! -f "$ROOT/atk.up" ]; then
+    echo "  !! attacker ns never configured atk0 ($ATK_IP)"
+    echo "     atk ns: $(in_atk ip -br addr 2>&1 | tr '\n' ' ')"
+    return 1
+  fi
+  sleep 0.5   # let the interface settle before the first ping
   return 0
 }
 
@@ -114,11 +169,28 @@ start_agent() {
     "$PY" -m src.lidra_agent_v3 --interface "$IFACE" --no-tui \
     >"$ROOT/agent.log" 2>&1 &
   AGENT_PID=$!
-  for _ in $(seq 1 80); do
-    [ -f "$ROOT/data/lidra.db" ] && sleep 4 && return 0
+  # Wait for the DB, then for the capture socket to actually bind — polling both
+  # rather than sleeping a fixed amount. A fixed `sleep 4` made t7_ja4 fail
+  # intermittently inside `matrix.sh all` (it passed alone): under sequential
+  # load the agent takes longer to bind, verify_capture greps once, and the case
+  # reports "capture-precheck" — a harness timing flake wearing the costume of a
+  # detector failure. Same lesson as the precheck itself: never assert a negative
+  # on a deadline you guessed.
+  local _
+  for _ in $(seq 1 120); do
+    [ -f "$ROOT/data/lidra.db" ] && break
     sleep 0.5
   done
-  echo "  !! agent did not start"; tail -15 "$ROOT/agent.log"; return 1
+  [ -f "$ROOT/data/lidra.db" ] || {
+    echo "  !! agent did not start"; tail -15 "$ROOT/agent.log"; return 1; }
+
+  for _ in $(seq 1 60); do
+    grep -q "Bound raw socket to $IFACE" "$ROOT/agent.log" && return 0
+    kill -0 "$AGENT_PID" 2>/dev/null || {
+      echo "  !! agent exited before binding"; tail -15 "$ROOT/agent.log"; return 1; }
+    sleep 0.5
+  done
+  echo "  !! agent never bound $IFACE within 30s"; tail -15 "$ROOT/agent.log"; return 1
 }
 
 stop_agent() {
@@ -138,9 +210,16 @@ verify_capture() {
     echo "     pid=$ATK_PID alive=$(kill -0 "$ATK_PID" 2>/dev/null && echo yes || echo no)"
     return 1
   fi
-  grep -q "Bound raw socket to $IFACE" "$ROOT/agent.log" || {
-    echo "  !! agent did not bind $IFACE"; tail -5 "$ROOT/agent.log"; return 1; }
-  return 0
+  # Retry the bind check rather than grepping once: agent startup time varies
+  # with system load, and a single grep turns that variance into a spurious
+  # "capture-precheck" failure. start_agent already waits for the bind, so this
+  # is a second, shorter grace period.
+  local i
+  for i in $(seq 1 20); do
+    grep -q "Bound raw socket to $IFACE" "$ROOT/agent.log" && return 0
+    sleep 0.5
+  done
+  echo "  !! agent did not bind $IFACE"; tail -5 "$ROOT/agent.log"; return 1
 }
 
 # ── db readers ──────────────────────────────────────────────────────────────
